@@ -2,6 +2,9 @@
 # This file is installed to ~/.zshrc.local by bootstrap.sh.
 # It is NOT part of the dotfiles repo — local-only.
 
+# Suppress p10k instant prompt warning (tmux attach produces console output)
+typeset -g POWERLEVEL9K_INSTANT_PROMPT=quiet
+
 # Load nvm (dotfiles .zshrc overwrites nvm's auto-added lines)
 export NVM_DIR="$HOME/.nvm"
 [[ -s "$NVM_DIR/nvm.sh" ]] && source "$NVM_DIR/nvm.sh"
