@@ -2,6 +2,10 @@
 # This file is installed to ~/.zshrc.local by bootstrap.sh.
 # It is NOT part of the dotfiles repo — local-only.
 
+# Load nvm (dotfiles .zshrc overwrites nvm's auto-added lines)
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
 # Warn if dotfiles sync has failed
 if [[ -f ~/.local/log/cron/dotfiles-sync-failed ]]; then
     echo "\033[33m⚠ Dotfiles sync has failed. Run 'cd ~/dotfiles && git pull' to investigate.\033[0m"
