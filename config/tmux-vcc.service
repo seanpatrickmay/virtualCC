@@ -1,0 +1,13 @@
+[Unit]
+Description=VCC tmux session
+After=default.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=PATH=/usr/bin:/bin:/usr/local/bin
+ExecStart=/home/dev/.local/bin/tmux-session.sh
+ExecStop=/usr/bin/tmux kill-session -t vcc
+
+[Install]
+WantedBy=default.target

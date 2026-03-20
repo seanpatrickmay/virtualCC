@@ -1,0 +1,11 @@
+# VCC hardened SSH config.
+# Installed by bootstrap.sh to /etc/ssh/sshd_config.d/vcc.conf
+# Uses the sshd_config.d drop-in directory (Ubuntu 24.04 default).
+
+PasswordAuthentication no
+PermitRootLogin no
+ChallengeResponseAuthentication no
+UsePAM yes
+X11Forwarding no
+PrintMotd no
+AcceptEnv LANG LC_*

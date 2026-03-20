@@ -1,0 +1,17 @@
+#!/bin/bash
+# Weekly system update. Runs as root cron (Sunday 3am).
+# Uses non-interactive mode to prevent config file prompts.
+
+set -euo pipefail
+
+LOG_DIR="/home/dev/.local/log/cron"
+mkdir -p "$LOG_DIR"
+
+{
+    echo "=== System update: $(date) ==="
+    DEBIAN_FRONTEND=noninteractive apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
+        -o Dpkg::Options::="--force-confdef" \
+        -o Dpkg::Options::="--force-confold"
+    echo "=== Done: $(date) ==="
+} >> "$LOG_DIR/update-system.log" 2>&1

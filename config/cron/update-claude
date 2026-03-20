@@ -1,0 +1,19 @@
+#!/bin/bash
+# Weekly Claude Code update. Runs as dev cron (Sunday 3:30am).
+# Must source nvm explicitly — cron has minimal environment.
+# Note: nvm.sh is not compatible with set -e (it exits non-zero internally),
+# so we disable it for the source and re-enable after.
+
+LOG_DIR="$HOME/.local/log/cron"
+mkdir -p "$LOG_DIR"
+
+{
+    echo "=== Claude Code update: $(date) ==="
+    export NVM_DIR="$HOME/.nvm"
+    set +e
+    # shellcheck source=/dev/null
+    source "$NVM_DIR/nvm.sh"
+    set -e
+    npm update -g @anthropic-ai/claude-code
+    echo "=== Done: $(date) ==="
+} >> "$LOG_DIR/update-claude.log" 2>&1

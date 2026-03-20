@@ -1,0 +1,29 @@
+#!/bin/bash
+# Daily dotfiles sync. Runs as dev cron (4am).
+# Uses --ff-only to fail cleanly on divergence.
+# Writes sentinel file on failure for login warning.
+# Note: does NOT use set -e — we handle errors explicitly
+# so the sentinel file is always written on failure.
+
+LOG_DIR="$HOME/.local/log/cron"
+SENTINEL="$LOG_DIR/dotfiles-sync-failed"
+mkdir -p "$LOG_DIR"
+
+{
+    echo "=== Dotfiles sync: $(date) ==="
+    if ! cd "$HOME/dotfiles" 2>/dev/null; then
+        touch "$SENTINEL"
+        echo "FAILED: ~/dotfiles directory does not exist."
+        echo "=== Done: $(date) ==="
+        exit 1
+    fi
+    if git pull --ff-only; then
+        # Clear sentinel on success
+        rm -f "$SENTINEL"
+        echo "Sync OK"
+    else
+        touch "$SENTINEL"
+        echo "FAILED: git pull --ff-only failed. Manual intervention needed."
+    fi
+    echo "=== Done: $(date) ==="
+} >> "$LOG_DIR/sync-dotfiles.log" 2>&1
