@@ -106,6 +106,14 @@ sudo -H -u "$DEV_USER" bash -c '
     git clone --depth=1 https://github.com/romkatv/powerlevel10k.git \
         "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
 ' 2>/dev/null || true
+sudo -H -u "$DEV_USER" bash -c '
+    git clone https://github.com/zsh-users/zsh-autosuggestions \
+        "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/zsh-autosuggestions"
+' 2>/dev/null || true
+sudo -H -u "$DEV_USER" bash -c '
+    git clone https://github.com/zsh-users/zsh-syntax-highlighting \
+        "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting"
+' 2>/dev/null || true
 
 # Step 7: Dotfiles
 echo "[7/11] Installing dotfiles..."
