@@ -192,7 +192,7 @@ sudo -H -u "$DEV_USER" bash -c "
 cp "$VCCDIR/config/cron/update-system" /usr/local/sbin/vcc-update-system
 chmod +x /usr/local/sbin/vcc-update-system
 SYSTEM_CRON="0 3 * * 0 /usr/local/sbin/vcc-update-system"
-(crontab -l 2>/dev/null | grep -v "update-system"; echo "$SYSTEM_CRON") | crontab -
+({ crontab -l 2>/dev/null || true; } | grep -v "update-system"; echo "$SYSTEM_CRON") | crontab -
 
 # Dev user crontab
 # Note: all variables are expanded in the root shell (double-quoted heredoc).
@@ -200,7 +200,7 @@ SYSTEM_CRON="0 3 * * 0 /usr/local/sbin/vcc-update-system"
 DEV_CRON_CLAUDE="30 3 * * 0 $DEV_HOME/.local/bin/update-claude"
 DEV_CRON_DOTFILES="0 4 * * * $DEV_HOME/.local/bin/sync-dotfiles"
 sudo -H -u "$DEV_USER" bash -c "
-    (crontab -l 2>/dev/null | grep -v 'update-claude' | grep -v 'sync-dotfiles' | grep -v '^SHELL=' | grep -v '^HOME='
+    ({ crontab -l 2>/dev/null || true; } | grep -v 'update-claude' | grep -v 'sync-dotfiles' | grep -v '^SHELL=' | grep -v '^HOME='
      echo \"SHELL=/bin/bash\"
      echo \"HOME=$DEV_HOME\"
      echo \"$DEV_CRON_CLAUDE\"
