@@ -4,7 +4,10 @@
 #
 # Usage:
 #   ssh root@<vps-ip> 'curl -fsSL https://raw.githubusercontent.com/seanpatrickmay/virtualCC/main/bootstrap.sh -o /tmp/bootstrap.sh'
-#   ssh root@<vps-ip> 'bash /tmp/bootstrap.sh'
+#   ssh root@<vps-ip> 'DEV_PASSWORD=yourpassword bash /tmp/bootstrap.sh'
+#
+# Environment variables:
+#   DEV_PASSWORD  Password for the dev user (used for sudo). Random if not set.
 #
 # This script must be run as root.
 
@@ -24,6 +27,7 @@ REPO_URL="https://github.com/seanpatrickmay/virtualCC.git"
 DOTFILES_URL="https://github.com/seanpatrickmay/dotfiles.git"
 DEV_USER="dev"
 DEV_HOME="/home/$DEV_USER"
+DEV_PASSWORD="${DEV_PASSWORD:-$(openssl rand -base64 32)}"
 
 echo "========================================="
 echo "VirtualCC Bootstrap — Phase 1: System Setup"
@@ -52,8 +56,7 @@ echo "[3/11] Creating dev user..."
 if ! id "$DEV_USER" &>/dev/null; then
     useradd -m -s /usr/bin/zsh "$DEV_USER"
     usermod -aG sudo "$DEV_USER"
-    # Set a random password (user won't use it — SSH key only)
-    echo "$DEV_USER:$(openssl rand -base64 32)" | chpasswd
+    echo "$DEV_USER:$DEV_PASSWORD" | chpasswd
 fi
 
 # Copy SSH keys from root to dev
