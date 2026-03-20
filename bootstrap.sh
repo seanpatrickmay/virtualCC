@@ -135,6 +135,16 @@ sudo -H -u "$DEV_USER" bash -c '
     ln -sf ~/dotfiles/.tmux ~/.tmux
 '
 
+# Install packer.nvim and sync plugins
+echo "[7b/11] Installing nvim plugins..."
+sudo -H -u "$DEV_USER" bash -c '
+    PACKER_DIR="$HOME/.local/share/nvim/site/pack/packer/start/packer.nvim"
+    if [ ! -d "$PACKER_DIR" ]; then
+        git clone --depth 1 https://github.com/wbthomason/packer.nvim "$PACKER_DIR"
+    fi
+    nvim --headless -c "autocmd User PackerComplete quitall" -c "PackerSync" 2>/dev/null
+'
+
 # Note: .zshrc.local sourcing is handled by the dotfiles repo.
 # The line `[[ -f ~/.zshrc.local ]] && source ~/.zshrc.local` must already
 # exist in the dotfiles .zshrc. This is set up in Task 0 (pre-requisite).
