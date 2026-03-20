@@ -71,12 +71,12 @@ echo "========================================="
 # Clone this repo for config files
 echo "[*] Cloning virtualCC repo for config files..."
 VCCDIR="$DEV_HOME/.local/share/virtualCC"
-sudo -u "$DEV_USER" bash -c "mkdir -p '$DEV_HOME/.local/share' && git clone '$REPO_URL' '$VCCDIR'" 2>/dev/null || \
-    sudo -u "$DEV_USER" bash -c "cd '$VCCDIR' && git pull"
+sudo -H -u "$DEV_USER" bash -c "mkdir -p '$DEV_HOME/.local/share' && git clone '$REPO_URL' '$VCCDIR'" 2>/dev/null || \
+    sudo -H -u "$DEV_USER" bash -c "cd '$VCCDIR' && git pull"
 
 # Step 4: Node.js via nvm
 echo "[4/11] Installing nvm and Node.js..."
-sudo -u "$DEV_USER" bash -c '
+sudo -H -u "$DEV_USER" bash -c '
     curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
     export NVM_DIR="$HOME/.nvm"
     # shellcheck source=/dev/null
@@ -86,7 +86,7 @@ sudo -u "$DEV_USER" bash -c '
 
 # Step 5: Claude Code
 echo "[5/11] Installing Claude Code..."
-sudo -u "$DEV_USER" bash -c '
+sudo -H -u "$DEV_USER" bash -c '
     export NVM_DIR="$HOME/.nvm"
     # shellcheck source=/dev/null
     source "$NVM_DIR/nvm.sh"
@@ -97,20 +97,20 @@ sudo -u "$DEV_USER" bash -c '
 echo "[6/11] Installing Oh My Zsh and Powerlevel10k..."
 # Download installer first, then run as dev user to avoid $() expanding as root
 curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh -o /tmp/install-omz.sh
-sudo -u "$DEV_USER" RUNZSH=no CHSH=no bash /tmp/install-omz.sh
+sudo -H -u "$DEV_USER" RUNZSH=no CHSH=no bash /tmp/install-omz.sh
 rm -f /tmp/install-omz.sh
-sudo -u "$DEV_USER" bash -c '
+sudo -H -u "$DEV_USER" bash -c '
     git clone --depth=1 https://github.com/romkatv/powerlevel10k.git \
         "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
 ' 2>/dev/null || true
 
 # Step 7: Dotfiles
 echo "[7/11] Installing dotfiles..."
-sudo -u "$DEV_USER" bash -c "git clone '$DOTFILES_URL' '$DEV_HOME/dotfiles'" 2>/dev/null || \
-    sudo -u "$DEV_USER" bash -c "cd '$DEV_HOME/dotfiles' && git pull"
+sudo -H -u "$DEV_USER" bash -c "git clone '$DOTFILES_URL' '$DEV_HOME/dotfiles'" 2>/dev/null || \
+    sudo -H -u "$DEV_USER" bash -c "cd '$DEV_HOME/dotfiles' && git pull"
 
 # Symlink dotfiles (force overwrite oh-my-zsh's .zshrc)
-sudo -u "$DEV_USER" bash -c '
+sudo -H -u "$DEV_USER" bash -c '
     ln -sf ~/dotfiles/.zshrc ~/.zshrc
     ln -sf ~/dotfiles/.p10k.zsh ~/.p10k.zsh
     ln -sf ~/dotfiles/.vimrc ~/.vimrc
@@ -132,7 +132,7 @@ sudo -u "$DEV_USER" bash -c '
 
 # Step 8: tmux systemd service
 echo "[8/11] Setting up tmux auto-start service..."
-sudo -u "$DEV_USER" bash -c "
+sudo -H -u "$DEV_USER" bash -c "
     mkdir -p ~/.local/bin
     cp '$VCCDIR/config/tmux-session.sh' ~/.local/bin/tmux-session.sh
     chmod +x ~/.local/bin/tmux-session.sh
@@ -157,7 +157,7 @@ done
 if [ ! -S "/run/user/$DEV_UID/bus" ]; then
     echo "WARNING: User bus socket not found after 30s. tmux service may need manual start."
 else
-    sudo -u "$DEV_USER" bash -c "
+    sudo -H -u "$DEV_USER" bash -c "
         export XDG_RUNTIME_DIR=/run/user/$DEV_UID
         export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$DEV_UID/bus
         systemctl --user daemon-reload
@@ -169,7 +169,7 @@ fi
 
 # Step 9: Install zshrc.local
 echo "[9/11] Installing zshrc.local (tmux auto-attach)..."
-sudo -u "$DEV_USER" bash -c "cp '$VCCDIR/config/zshrc.local' ~/.zshrc.local"
+sudo -H -u "$DEV_USER" bash -c "cp '$VCCDIR/config/zshrc.local' ~/.zshrc.local"
 
 echo "========================================="
 echo "VirtualCC Bootstrap — Phase 3: Finalization"
@@ -179,10 +179,10 @@ echo "========================================="
 echo "[10/11] Installing cron jobs..."
 
 # Create log directory
-sudo -u "$DEV_USER" bash -c "mkdir -p ~/.local/log/cron"
+sudo -H -u "$DEV_USER" bash -c "mkdir -p ~/.local/log/cron"
 
 # Install cron wrapper scripts
-sudo -u "$DEV_USER" bash -c "
+sudo -H -u "$DEV_USER" bash -c "
     cp '$VCCDIR/config/cron/update-claude' ~/.local/bin/update-claude
     cp '$VCCDIR/config/cron/sync-dotfiles' ~/.local/bin/sync-dotfiles
     chmod +x ~/.local/bin/update-claude ~/.local/bin/sync-dotfiles
@@ -199,7 +199,7 @@ SYSTEM_CRON="0 3 * * 0 /usr/local/sbin/vcc-update-system"
 # The crontab receives the resolved paths, not variable references.
 DEV_CRON_CLAUDE="30 3 * * 0 $DEV_HOME/.local/bin/update-claude"
 DEV_CRON_DOTFILES="0 4 * * * $DEV_HOME/.local/bin/sync-dotfiles"
-sudo -u "$DEV_USER" bash -c "
+sudo -H -u "$DEV_USER" bash -c "
     (crontab -l 2>/dev/null | grep -v 'update-claude' | grep -v 'sync-dotfiles' | grep -v '^SHELL=' | grep -v '^HOME='
      echo \"SHELL=/bin/bash\"
      echo \"HOME=$DEV_HOME\"
