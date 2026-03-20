@@ -1,0 +1,12 @@
+# VCC: Auto-attach to tmux BEFORE .zshrc runs.
+# Must happen before p10k instant prompt captures the terminal.
+# Uses exec so detaching from tmux also ends the SSH session.
+
+if [[ -z "$TMUX" && -n "$SSH_CONNECTION" && -o interactive ]]; then
+    if tmux has-session -t vcc 2>/dev/null; then
+        exec tmux attach-session -t vcc
+    elif [[ -x /home/dev/.local/bin/tmux-session.sh ]]; then
+        /home/dev/.local/bin/tmux-session.sh
+        exec tmux attach-session -t vcc
+    fi
+fi

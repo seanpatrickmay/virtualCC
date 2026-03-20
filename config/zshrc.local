@@ -1,9 +1,6 @@
-# VCC: Auto-attach to tmux on interactive SSH login.
+# VCC: Local zsh config for the VPS.
 # This file is installed to ~/.zshrc.local by bootstrap.sh.
 # It is NOT part of the dotfiles repo — local-only.
-
-# Suppress p10k instant prompt warning (tmux attach produces console output)
-typeset -g POWERLEVEL9K_INSTANT_PROMPT=quiet
 
 # Load nvm (dotfiles .zshrc overwrites nvm's auto-added lines)
 export NVM_DIR="$HOME/.nvm"
@@ -14,14 +11,5 @@ if [[ -f ~/.local/log/cron/dotfiles-sync-failed ]]; then
     echo "\033[33m⚠ Dotfiles sync has failed. Run 'cd ~/dotfiles && git pull' to investigate.\033[0m"
 fi
 
-# Auto-attach to tmux session "vcc" for interactive SSH sessions only.
-# Guards: skip if already in tmux, not an SSH session, or non-interactive shell.
-# This prevents breaking SCP, SFTP, rsync, and "ssh host command" invocations.
 # Kill tmux session and disconnect SSH
 bye() { tmux kill-session -t vcc 2>/dev/null; exit; }
-
-if [[ -z "$TMUX" && -n "$SSH_CONNECTION" && -o interactive ]]; then
-    if ! tmux attach-session -t vcc 2>/dev/null; then
-        /home/dev/.local/bin/tmux-session.sh && tmux attach-session -t vcc
-    fi
-fi

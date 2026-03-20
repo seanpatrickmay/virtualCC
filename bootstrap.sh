@@ -198,9 +198,17 @@ else
     echo "[8/11] tmux service started."
 fi
 
-# Step 9: Install zshrc.local
-echo "[9/11] Installing zshrc.local (tmux auto-attach)..."
+# Step 9: Install shell config
+echo "[9/11] Installing zshrc.local and zprofile.local..."
 sudo -H -u "$DEV_USER" bash -c "cp '$VCCDIR/config/zshrc.local' ~/.zshrc.local"
+sudo -H -u "$DEV_USER" bash -c "cp '$VCCDIR/config/zprofile.local' ~/.zprofile.local"
+
+# Ensure .zprofile sources .zprofile.local
+sudo -H -u "$DEV_USER" bash -c '
+    touch ~/.zprofile
+    grep -q "zprofile.local" ~/.zprofile 2>/dev/null || \
+        echo "[[ -f ~/.zprofile.local ]] && source ~/.zprofile.local" >> ~/.zprofile
+'
 
 echo "========================================="
 echo "VirtualCC Bootstrap — Phase 3: Finalization"
