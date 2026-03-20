@@ -96,6 +96,16 @@ sudo -H -u "$DEV_USER" bash -c '
     npm install -g @anthropic-ai/claude-code
 '
 
+# Step 5b: Claude Code config
+echo "[5b/11] Installing Claude Code config..."
+sudo -H -u "$DEV_USER" bash -c "
+    mkdir -p ~/.claude
+    cp '$VCCDIR/config/claude/settings.json' ~/.claude/settings.json
+    cp '$VCCDIR/config/claude/mcp_config.json' ~/.claude/mcp_config.json
+    cp '$VCCDIR/config/claude/CLAUDE.md' ~/.claude/CLAUDE.md
+    cp '$VCCDIR/config/claude/keybindings.json' ~/.claude/keybindings.json
+"
+
 # Step 6: Oh My Zsh + Powerlevel10k
 echo "[6/11] Installing Oh My Zsh and Powerlevel10k..."
 # Download installer first, then run as dev user to avoid $() expanding as root
