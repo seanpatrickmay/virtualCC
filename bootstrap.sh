@@ -95,9 +95,10 @@ sudo -u "$DEV_USER" bash -c '
 
 # Step 6: Oh My Zsh + Powerlevel10k
 echo "[6/11] Installing Oh My Zsh and Powerlevel10k..."
-sudo -u "$DEV_USER" bash -c '
-    RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
-'
+# Download installer first, then run as dev user to avoid $() expanding as root
+curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh -o /tmp/install-omz.sh
+sudo -u "$DEV_USER" RUNZSH=no CHSH=no bash /tmp/install-omz.sh
+rm -f /tmp/install-omz.sh
 sudo -u "$DEV_USER" bash -c '
     git clone --depth=1 https://github.com/romkatv/powerlevel10k.git \
         "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
