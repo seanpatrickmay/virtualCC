@@ -97,7 +97,7 @@ sudo -H -u "$DEV_USER" bash -c '
 echo "[6/11] Installing Oh My Zsh and Powerlevel10k..."
 # Download installer first, then run as dev user to avoid $() expanding as root
 curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh -o /tmp/install-omz.sh
-sudo -H -u "$DEV_USER" RUNZSH=no CHSH=no bash /tmp/install-omz.sh
+sudo -H -u "$DEV_USER" RUNZSH=no CHSH=no bash /tmp/install-omz.sh || true
 rm -f /tmp/install-omz.sh
 sudo -H -u "$DEV_USER" bash -c '
     git clone --depth=1 https://github.com/romkatv/powerlevel10k.git \
