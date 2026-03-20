@@ -227,9 +227,9 @@ fi
 # A cron job will revert the config in 5 minutes unless cancelled.
 # The completion message tells the operator to cancel it after verifying SSH access.
 cp "$VCCDIR/config/sshd_config" /etc/ssh/sshd_config.d/vcc.conf
-echo "rm -f /etc/ssh/sshd_config.d/vcc.conf && systemctl restart sshd" | at now + 5 minutes 2>/dev/null || \
+echo "rm -f /etc/ssh/sshd_config.d/vcc.conf && systemctl restart ssh" | at now + 5 minutes 2>/dev/null || \
     echo "WARNING: 'at' not available. No automatic rollback. Verify SSH access immediately."
-systemctl restart sshd
+systemctl restart ssh
 
 echo ""
 echo "========================================="
