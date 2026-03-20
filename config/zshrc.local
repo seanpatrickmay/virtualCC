@@ -17,6 +17,9 @@ fi
 # Auto-attach to tmux session "vcc" for interactive SSH sessions only.
 # Guards: skip if already in tmux, not an SSH session, or non-interactive shell.
 # This prevents breaking SCP, SFTP, rsync, and "ssh host command" invocations.
+# Kill tmux session and disconnect SSH
+bye() { tmux kill-session -t vcc 2>/dev/null; exit; }
+
 if [[ -z "$TMUX" && -n "$SSH_CONNECTION" && -o interactive ]]; then
     if ! tmux attach-session -t vcc 2>/dev/null; then
         /home/dev/.local/bin/tmux-session.sh && tmux attach-session -t vcc
