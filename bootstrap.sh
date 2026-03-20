@@ -192,21 +192,26 @@ sudo -H -u "$DEV_USER" bash -c "
 cp "$VCCDIR/config/cron/update-system" /usr/local/sbin/vcc-update-system
 chmod +x /usr/local/sbin/vcc-update-system
 SYSTEM_CRON="0 3 * * 0 /usr/local/sbin/vcc-update-system"
-({ crontab -l 2>/dev/null || true; } | grep -v "update-system"; echo "$SYSTEM_CRON") | crontab -
+# Disable errexit: crontab -l and grep -v both return 1 on empty input
+set +e
+(crontab -l 2>/dev/null | grep -v "update-system"; echo "$SYSTEM_CRON") | crontab -
+set -e
 
 # Dev user crontab
 # Note: all variables are expanded in the root shell (double-quoted heredoc).
 # The crontab receives the resolved paths, not variable references.
 DEV_CRON_CLAUDE="30 3 * * 0 $DEV_HOME/.local/bin/update-claude"
 DEV_CRON_DOTFILES="0 4 * * * $DEV_HOME/.local/bin/sync-dotfiles"
+set +e
 sudo -H -u "$DEV_USER" bash -c "
-    ({ crontab -l 2>/dev/null || true; } | grep -v 'update-claude' | grep -v 'sync-dotfiles' | grep -v '^SHELL=' | grep -v '^HOME='
+    (crontab -l 2>/dev/null | grep -v 'update-claude' | grep -v 'sync-dotfiles' | grep -v '^SHELL=' | grep -v '^HOME='
      echo \"SHELL=/bin/bash\"
      echo \"HOME=$DEV_HOME\"
      echo \"$DEV_CRON_CLAUDE\"
      echo \"$DEV_CRON_DOTFILES\"
     ) | crontab -
 "
+set -e
 
 # Step 11: SSH hardening (last step)
 echo "[11/11] Hardening SSH..."
