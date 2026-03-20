@@ -40,7 +40,7 @@ DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
     -o Dpkg::Options::="--force-confdef" \
     -o Dpkg::Options::="--force-confold"
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    git curl build-essential zsh tmux unzip python3 openssl ufw fail2ban at
+    git curl build-essential zsh tmux unzip python3 openssl ufw fail2ban at neovim
 
 # Ensure atd is running (needed for SSH hardening safety rollback)
 systemctl enable atd
