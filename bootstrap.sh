@@ -140,7 +140,7 @@ sudo -H -u "$DEV_USER" bash -c '
     export NVM_DIR="$HOME/.nvm"
     # shellcheck source=/dev/null
     source "$NVM_DIR/nvm.sh"
-    npm install -g @anthropic-ai/claude-code
+    npm install -g @anthropic-ai/claude-code tree-sitter-cli
 '
 
 # Step 5b: Claude Code config
@@ -219,14 +219,25 @@ sudo -H -u "$DEV_USER" bash -c '
 sudo -H -u "$DEV_USER" bash -c 'timeout 10 nvim --headless -c "PackerCompile" -c "quitall" 2>/dev/null' || true
 
 # Pre-install treesitter parsers (avoids compile delay on first file open)
+# Requires tree-sitter-cli (installed with Claude Code above) and gcc (build-essential).
+# TSInstall runs async — sleep gives time for compilation before quitting.
 echo "[7c/12] Installing treesitter parsers..."
-sudo -H -u "$DEV_USER" bash -c 'timeout 120 nvim --headless -c "TSInstall javascript typescript c lua vim vimdoc query markdown markdown_inline python bash json html css yaml toml" -c "sleep 5" -c "quitall" 2>/dev/null' || true
+sudo -H -u "$DEV_USER" bash -c '
+    export NVM_DIR="$HOME/.nvm"
+    # shellcheck source=/dev/null
+    source "$NVM_DIR/nvm.sh"
+    timeout 180 nvim --headless \
+        -c "TSInstall lua bash python javascript typescript c json html css yaml toml markdown vim vimdoc query markdown_inline" \
+        -c "sleep 60" -c "quitall" 2>/dev/null
+' || true
 
-# Note: .zshrc.local sourcing is handled by the dotfiles repo.
-# The line `[[ -f ~/.zshrc.local ]] && source ~/.zshrc.local` must already
-# exist in the dotfiles .zshrc. This is set up in Task 0 (pre-requisite).
-# We do NOT modify ~/dotfiles/.zshrc during bootstrap — that would dirty
-# the repo and cause git pull --ff-only to fail on the next sync.
+# Ensure dotfiles .zshrc sources .zshrc.local (required for nvm, env vars, server utilities).
+# Appends the line only if missing. Safe for git pull --ff-only since the dotfiles repo
+# should already have this line committed upstream.
+sudo -H -u "$DEV_USER" bash -c '
+    grep -q "zshrc.local" ~/dotfiles/.zshrc 2>/dev/null || \
+        echo -e "\n# VCC: Source local config (nvm, env vars, server utilities)\n[[ -f ~/.zshrc.local ]] && source ~/.zshrc.local" >> ~/dotfiles/.zshrc
+'
 
 # Step 8: tmux systemd service
 echo "[8/12] Setting up tmux auto-start service..."
