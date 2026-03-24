@@ -1,0 +1,61 @@
+#!/bin/bash
+# Self-update: pull latest virtualCC repo and re-apply configs.
+# Runs as dev cron (daily). Safe to run manually too.
+# Idempotent — only copies files if repo pull succeeds.
+
+LOG_DIR="$HOME/.local/log/cron"
+mkdir -p "$LOG_DIR"
+
+VCCDIR="$HOME/.local/share/virtualCC"
+
+{
+    echo "=== VCC self-update: $(date) ==="
+
+    if [ ! -d "$VCCDIR/.git" ]; then
+        echo "SKIP: virtualCC repo not found at $VCCDIR"
+        echo "=== Done: $(date) ==="
+        exit 0
+    fi
+
+    cd "$VCCDIR" || exit 1
+
+    # Pull latest (ff-only to avoid conflicts)
+    if ! git pull --ff-only; then
+        echo "WARNING: git pull --ff-only failed. Manual intervention needed."
+        echo "=== Done: $(date) ==="
+        exit 1
+    fi
+
+    # Re-apply config files that bootstrap installs as copies
+    echo "Applying updated configs..."
+
+    # Shell configs
+    cp "$VCCDIR/config/zshrc.local" ~/.zshrc.local
+    cp "$VCCDIR/config/zprofile.local" ~/.zprofile.local
+
+    # Cron scripts
+    cp "$VCCDIR/config/cron/update-claude" ~/.local/bin/update-claude
+    cp "$VCCDIR/config/cron/sync-dotfiles" ~/.local/bin/sync-dotfiles
+    cp "$VCCDIR/config/cron/vcc-update" ~/.local/bin/vcc-update
+    cp "$VCCDIR/config/cron/tmux-watchdog" ~/.local/bin/tmux-watchdog
+    cp "$VCCDIR/config/cron/disk-cleanup" ~/.local/bin/disk-cleanup
+    cp "$VCCDIR/config/health-check.sh" ~/.local/bin/health-check
+    chmod +x ~/.local/bin/update-claude ~/.local/bin/sync-dotfiles ~/.local/bin/vcc-update ~/.local/bin/tmux-watchdog ~/.local/bin/disk-cleanup ~/.local/bin/health-check
+
+    # tmux session script
+    cp "$VCCDIR/config/tmux-session.sh" ~/.local/bin/tmux-session.sh
+    chmod +x ~/.local/bin/tmux-session.sh
+
+    # Claude Code config
+    mkdir -p ~/.claude
+    cp "$VCCDIR/config/claude/settings.json" ~/.claude/settings.json
+    cp "$VCCDIR/config/claude/mcp_config.json" ~/.claude/mcp_config.json
+    cp "$VCCDIR/config/claude/CLAUDE.md" ~/.claude/CLAUDE.md
+    cp "$VCCDIR/config/claude/keybindings.json" ~/.claude/keybindings.json
+
+    # Log rotation
+    cp "$VCCDIR/config/logrotate.conf" ~/.config/logrotate.conf
+
+    echo "Configs applied."
+    echo "=== Done: $(date) ==="
+} >> "$LOG_DIR/vcc-update.log" 2>&1

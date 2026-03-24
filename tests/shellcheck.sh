@@ -7,9 +7,13 @@ set -euo pipefail
 SCRIPTS=(
     "bootstrap.sh"
     "config/tmux-session.sh"
+    "config/health-check.sh"
     "config/cron/update-system"
     "config/cron/update-claude"
     "config/cron/sync-dotfiles"
+    "config/cron/vcc-update"
+    "config/cron/disk-cleanup"
+    "config/cron/tmux-watchdog"
 )
 
 # Skip scripts that don't exist yet (allows running before all tasks complete)

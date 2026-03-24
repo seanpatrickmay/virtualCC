@@ -9,3 +9,9 @@ UsePAM yes
 X11Forwarding no
 PrintMotd no
 AcceptEnv LANG LC_*
+
+# Keep mobile connections alive through network transitions.
+# Sends a keepalive every 30s, tolerates 3 misses (90s total)
+# before considering the connection dead.
+ClientAliveInterval 30
+ClientAliveCountMax 3

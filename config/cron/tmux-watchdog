@@ -1,0 +1,30 @@
+#!/bin/bash
+# Watchdog: ensure tmux "vcc" session is always running.
+# Runs every 5 minutes via cron. If the session is missing,
+# recreates it using the standard tmux-session.sh script.
+
+if tmux has-session -t vcc 2>/dev/null; then
+    exit 0
+fi
+
+# Session is down — try to recreate
+LOG_DIR="$HOME/.local/log/cron"
+mkdir -p "$LOG_DIR"
+
+{
+    echo "=== tmux watchdog: $(date) ==="
+    echo "Session 'vcc' not found. Recreating..."
+
+    if [ -x "$HOME/.local/bin/tmux-session.sh" ]; then
+        "$HOME/.local/bin/tmux-session.sh"
+        if tmux has-session -t vcc 2>/dev/null; then
+            echo "Session recreated successfully."
+        else
+            echo "ERROR: Failed to recreate session."
+        fi
+    else
+        echo "ERROR: tmux-session.sh not found at ~/.local/bin/tmux-session.sh"
+    fi
+
+    echo "=== Done: $(date) ==="
+} >> "$LOG_DIR/tmux-watchdog.log" 2>&1

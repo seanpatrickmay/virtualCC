@@ -1,0 +1,107 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    git curl zsh fuse3 libfuse2t64 python3
+
+RUN useradd -m -s /usr/bin/zsh dev
+
+# Install neovim from GitHub releases (apt version is too old)
+# Auto-detect architecture for multi-platform builds
+ARG TARGETARCH
+RUN NVIM_VERSION="v0.11.4" && \
+    case "$TARGETARCH" in \
+        amd64) NVIM_ARCH="linux-x86_64" ;; \
+        arm64) NVIM_ARCH="linux-arm64" ;; \
+        *) echo "Unsupported arch: $TARGETARCH" && exit 1 ;; \
+    esac && \
+    curl -Lo /tmp/nvim.tar.gz \
+        "https://github.com/neovim/neovim/releases/download/$NVIM_VERSION/nvim-$NVIM_ARCH.tar.gz" && \
+    tar xzf /tmp/nvim.tar.gz -C /opt && \
+    ln -s "/opt/nvim-$NVIM_ARCH/bin/nvim" /usr/local/bin/nvim && \
+    rm /tmp/nvim.tar.gz
+
+USER dev
+WORKDIR /home/dev
+
+RUN git clone https://github.com/seanpatrickmay/dotfiles.git ~/dotfiles
+
+RUN mkdir -p ~/.config && \
+    ln -sf ~/dotfiles/.config/nvim ~/.config/nvim
+
+# Install all plugins directly
+ENV PLUGIN_DIR=/home/dev/.local/share/nvim/site/pack/packer/start
+RUN mkdir -p $PLUGIN_DIR && \
+    git clone --depth 1 https://github.com/wbthomason/packer.nvim $PLUGIN_DIR/packer.nvim && \
+    git clone --depth 1 https://github.com/nvim-telescope/telescope.nvim $PLUGIN_DIR/telescope.nvim && \
+    git clone --depth 1 https://github.com/nvim-lua/plenary.nvim $PLUGIN_DIR/plenary.nvim && \
+    git clone --depth 1 https://github.com/rose-pine/neovim $PLUGIN_DIR/rose-pine && \
+    git clone --depth 1 https://github.com/nvim-treesitter/nvim-treesitter $PLUGIN_DIR/nvim-treesitter && \
+    git clone --depth 1 https://github.com/mbbill/undotree $PLUGIN_DIR/undotree && \
+    git clone --depth 1 https://github.com/tpope/vim-fugitive $PLUGIN_DIR/vim-fugitive && \
+    git clone --depth 1 https://github.com/lervag/vimtex $PLUGIN_DIR/vimtex && \
+    git clone --depth 1 https://github.com/RRethy/vim-illuminate $PLUGIN_DIR/vim-illuminate && \
+    git clone --depth 1 https://github.com/nvim-tree/nvim-tree.lua $PLUGIN_DIR/nvim-tree.lua && \
+    git clone --depth 1 https://github.com/shellRaining/hlchunk.nvim $PLUGIN_DIR/hlchunk.nvim && \
+    git clone --depth 1 https://github.com/nvim-lualine/lualine.nvim $PLUGIN_DIR/lualine.nvim && \
+    git clone --depth 1 https://github.com/nvim-tree/nvim-web-devicons $PLUGIN_DIR/nvim-web-devicons
+
+# Generate packer_compiled.lua
+RUN timeout 10 nvim --headless -c 'PackerCompile' -c 'quitall' 2>&1; exit 0
+
+# Final check
+RUN nvim --headless -c 'quitall' 2>&1; exit 0
+
+# === Config installation test ===
+# Simulate the config installation steps from bootstrap.sh
+# (without root/systemd) to verify paths and file placement.
+
+COPY --chown=dev:dev config/ /tmp/vcc-config/
+
+# Install scripts to ~/.local/bin (same as bootstrap step 10)
+RUN mkdir -p ~/.local/bin ~/.local/log/cron ~/.local/state ~/.config ~/.claude && \
+    cp /tmp/vcc-config/cron/update-claude ~/.local/bin/update-claude && \
+    cp /tmp/vcc-config/cron/sync-dotfiles ~/.local/bin/sync-dotfiles && \
+    cp /tmp/vcc-config/cron/vcc-update ~/.local/bin/vcc-update && \
+    cp /tmp/vcc-config/cron/tmux-watchdog ~/.local/bin/tmux-watchdog && \
+    cp /tmp/vcc-config/cron/disk-cleanup ~/.local/bin/disk-cleanup && \
+    cp /tmp/vcc-config/health-check.sh ~/.local/bin/health-check && \
+    cp /tmp/vcc-config/tmux-session.sh ~/.local/bin/tmux-session.sh && \
+    chmod +x ~/.local/bin/*
+
+# Install Claude config
+RUN cp /tmp/vcc-config/claude/settings.json ~/.claude/settings.json && \
+    cp /tmp/vcc-config/claude/mcp_config.json ~/.claude/mcp_config.json && \
+    cp /tmp/vcc-config/claude/CLAUDE.md ~/.claude/CLAUDE.md && \
+    cp /tmp/vcc-config/claude/keybindings.json ~/.claude/keybindings.json
+
+# Install shell + logrotate config
+RUN cp /tmp/vcc-config/zshrc.local ~/.zshrc.local && \
+    cp /tmp/vcc-config/zprofile.local ~/.zprofile.local && \
+    cp /tmp/vcc-config/logrotate.conf ~/.config/logrotate.conf && \
+    cp /tmp/vcc-config/env.template ~/.env
+
+# Verify everything landed correctly
+RUN echo "=== Config installation verification ===" && \
+    test -x ~/.local/bin/health-check && echo "✓ health-check executable" && \
+    test -x ~/.local/bin/tmux-session.sh && echo "✓ tmux-session.sh executable" && \
+    test -x ~/.local/bin/update-claude && echo "✓ update-claude executable" && \
+    test -x ~/.local/bin/sync-dotfiles && echo "✓ sync-dotfiles executable" && \
+    test -x ~/.local/bin/vcc-update && echo "✓ vcc-update executable" && \
+    test -x ~/.local/bin/tmux-watchdog && echo "✓ tmux-watchdog executable" && \
+    test -x ~/.local/bin/disk-cleanup && echo "✓ disk-cleanup executable" && \
+    test -f ~/.claude/settings.json && echo "✓ claude settings.json" && \
+    test -f ~/.claude/mcp_config.json && echo "✓ claude mcp_config.json" && \
+    test -f ~/.claude/keybindings.json && echo "✓ claude keybindings.json" && \
+    test -f ~/.zshrc.local && echo "✓ zshrc.local" && \
+    test -f ~/.zprofile.local && echo "✓ zprofile.local" && \
+    test -f ~/.config/logrotate.conf && echo "✓ logrotate.conf" && \
+    test -f ~/.env && echo "✓ env template" && \
+    test -d ~/.local/log/cron && echo "✓ cron log dir" && \
+    test -d ~/.local/state && echo "✓ state dir" && \
+    python3 -c "import json; json.load(open('/home/dev/.claude/settings.json'))" && echo "✓ settings.json valid JSON" && \
+    python3 -c "import json; json.load(open('/home/dev/.claude/mcp_config.json'))" && echo "✓ mcp_config.json valid JSON" && \
+    echo "=== All config checks passed ==="
+
+CMD ["zsh"]

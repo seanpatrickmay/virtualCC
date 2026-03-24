@@ -1,12 +1,31 @@
 # VCC: Auto-attach to tmux BEFORE .zshrc runs.
 # Must happen before p10k instant prompt captures the terminal.
 # Uses exec so detaching from tmux also ends the SSH session.
+#
+# Mobile detection: if terminal is narrow (< 120 cols), auto-zoom
+# the current pane so you get a single full-screen view. Desktop
+# users keep the 2x2 grid. The zoomed pane is still part of the
+# same session — Ctrl+B z toggles zoom on/off.
 
 if [[ -z "$TMUX" && -n "$SSH_CONNECTION" && -o interactive ]]; then
-    if tmux has-session -t vcc 2>/dev/null; then
-        exec tmux attach-session -t vcc
-    elif [[ -x /home/dev/.local/bin/tmux-session.sh ]]; then
-        /home/dev/.local/bin/tmux-session.sh
-        exec tmux attach-session -t vcc
-    fi
+    _vcc_attach() {
+        if ! tmux has-session -t vcc 2>/dev/null; then
+            if [[ -x /home/dev/.local/bin/tmux-session.sh ]]; then
+                /home/dev/.local/bin/tmux-session.sh
+            else
+                return 1
+            fi
+        fi
+
+        # Detect narrow terminal (phone/tablet) and auto-zoom
+        local cols
+        cols=$(tput cols 2>/dev/null || echo 120)
+        if [[ "$cols" -lt 120 ]]; then
+            # Attach and immediately zoom the active pane
+            exec tmux attach-session -t vcc \; resize-pane -Z
+        else
+            exec tmux attach-session -t vcc
+        fi
+    }
+    _vcc_attach
 fi

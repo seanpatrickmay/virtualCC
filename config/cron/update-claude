@@ -15,5 +15,6 @@ mkdir -p "$LOG_DIR"
     source "$NVM_DIR/nvm.sh"
     set -e
     npm update -g @anthropic-ai/claude-code
+    # Note: gh CLI is updated by the root update-system cron (apt-get upgrade)
     echo "=== Done: $(date) ==="
 } >> "$LOG_DIR/update-claude.log" 2>&1

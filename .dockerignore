@@ -1,0 +1,7 @@
+.git
+.claude
+.DS_Store
+*.swp
+*.swo
+*~
+docs/
