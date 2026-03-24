@@ -45,7 +45,8 @@ RUN mkdir -p $PLUGIN_DIR && \
     git clone --depth 1 https://github.com/nvim-tree/nvim-tree.lua $PLUGIN_DIR/nvim-tree.lua && \
     git clone --depth 1 https://github.com/shellRaining/hlchunk.nvim $PLUGIN_DIR/hlchunk.nvim && \
     git clone --depth 1 https://github.com/nvim-lualine/lualine.nvim $PLUGIN_DIR/lualine.nvim && \
-    git clone --depth 1 https://github.com/nvim-tree/nvim-web-devicons $PLUGIN_DIR/nvim-web-devicons
+    git clone --depth 1 https://github.com/nvim-tree/nvim-web-devicons $PLUGIN_DIR/nvim-web-devicons && \
+    git clone --depth 1 https://github.com/OXY2DEV/markview.nvim $PLUGIN_DIR/markview.nvim
 
 # Generate packer_compiled.lua
 RUN timeout 10 nvim --headless -c 'PackerCompile' -c 'quitall' 2>&1; exit 0

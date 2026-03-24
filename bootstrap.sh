@@ -213,9 +213,14 @@ sudo -H -u "$DEV_USER" bash -c '
     clone shellRaining/hlchunk.nvim hlchunk.nvim
     clone nvim-lualine/lualine.nvim lualine.nvim
     clone nvim-tree/nvim-web-devicons nvim-web-devicons
+    clone OXY2DEV/markview.nvim markview.nvim
 '
 # Generate packer_compiled.lua
 sudo -H -u "$DEV_USER" bash -c 'timeout 10 nvim --headless -c "PackerCompile" -c "quitall" 2>/dev/null' || true
+
+# Pre-install treesitter parsers (avoids compile delay on first file open)
+echo "[7c/12] Installing treesitter parsers..."
+sudo -H -u "$DEV_USER" bash -c 'timeout 120 nvim --headless -c "TSInstall javascript typescript c lua vim vimdoc query markdown markdown_inline python bash json html css yaml toml" -c "sleep 5" -c "quitall" 2>/dev/null' || true
 
 # Note: .zshrc.local sourcing is handled by the dotfiles repo.
 # The line `[[ -f ~/.zshrc.local ]] && source ~/.zshrc.local` must already
