@@ -1,0 +1,52 @@
+#!/bin/bash
+# Daily backup of non-git state (API keys, Claude auth, gitconfig).
+# Keeps 7 days of local backups in ~/.local/backups/.
+# Runs as dev cron (daily 5:30am).
+
+LOG_DIR="$HOME/.local/log/cron"
+BACKUP_DIR="$HOME/.local/backups"
+mkdir -p "$LOG_DIR" "$BACKUP_DIR"
+
+{
+    echo "=== Backup: $(date) ==="
+
+    TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+    BACKUP_FILE="$BACKUP_DIR/vcc-backup-$TIMESTAMP.tar.gz"
+
+    # Collect files to back up (only if they exist)
+    FILES_TO_BACKUP=()
+    [ -f "$HOME/.env" ] && FILES_TO_BACKUP+=("$HOME/.env")
+    [ -f "$HOME/.gitconfig" ] && FILES_TO_BACKUP+=("$HOME/.gitconfig")
+    [ -d "$HOME/.claude" ] && FILES_TO_BACKUP+=("$HOME/.claude")
+
+    # Back up uncommitted changes from project repos
+    DIFF_DIR=$(mktemp -d)
+    if [ -d "$HOME/projects" ]; then
+        for repo in "$HOME/projects"/*/; do
+            [ -d "$repo/.git" ] || continue
+            REPO_NAME=$(basename "$repo")
+            DIFF_FILE="$DIFF_DIR/$REPO_NAME.diff"
+            if git -C "$repo" diff --quiet 2>/dev/null && git -C "$repo" diff --cached --quiet 2>/dev/null; then
+                continue  # Clean repo, skip
+            fi
+            git -C "$repo" diff HEAD > "$DIFF_FILE" 2>/dev/null || true
+            [ -s "$DIFF_FILE" ] && FILES_TO_BACKUP+=("$DIFF_FILE")
+        done
+    fi
+
+    if [ ${#FILES_TO_BACKUP[@]} -eq 0 ]; then
+        echo "Nothing to back up."
+    else
+        tar czf "$BACKUP_FILE" "${FILES_TO_BACKUP[@]}" 2>/dev/null
+        echo "Created: $BACKUP_FILE ($(du -h "$BACKUP_FILE" | awk '{print $1}'))"
+    fi
+
+    rm -rf "$DIFF_DIR"
+
+    # Rotate: keep only last 7 days
+    find "$BACKUP_DIR" -name "vcc-backup-*.tar.gz" -type f -mtime +7 -delete 2>/dev/null
+    BACKUP_COUNT=$(find "$BACKUP_DIR" -name "vcc-backup-*.tar.gz" -type f | wc -l | tr -d ' ')
+    echo "Backups on disk: $BACKUP_COUNT"
+
+    echo "=== Done: $(date) ==="
+} >> "$LOG_DIR/backup.log" 2>&1
