@@ -1,0 +1,31 @@
+# VCC File Manifest
+# Format: source_path  dest_path  mode
+# Used by bootstrap.sh, vcc-update, validate-configs.sh, and Dockerfile.test
+# dest_path uses ~ for $HOME expansion
+#
+# Modes:
+#   +x             Copy and make executable
+#   644            Copy (not executable)
+#   json-merge     Merge repo defaults with user overrides (requires jq)
+#   bootstrap-only Only install if file doesn't exist (never overwrite)
+#
+# Scripts (executable)
+config/cron/update-claude	~/.local/bin/update-claude	+x
+config/cron/sync-dotfiles	~/.local/bin/sync-dotfiles	+x
+config/cron/vcc-update	~/.local/bin/vcc-update	+x
+config/cron/tmux-watchdog	~/.local/bin/tmux-watchdog	+x
+config/cron/disk-cleanup	~/.local/bin/disk-cleanup	+x
+config/cron/backup	~/.local/bin/backup	+x
+config/health-check.sh	~/.local/bin/health-check	+x
+config/tmux-session.sh	~/.local/bin/tmux-session.sh	+x
+#
+# Shell configs (not executable)
+config/zshrc.local	~/.zshrc.local	644
+config/zprofile.local	~/.zprofile.local	644
+config/logrotate.conf	~/.config/logrotate.conf	644
+#
+# Claude configs
+config/claude/settings.json	~/.claude/settings.json	json-merge
+config/claude/mcp_config.json	~/.claude/mcp_config.json	json-merge
+config/claude/CLAUDE.md	~/.claude/CLAUDE.md	bootstrap-only
+config/claude/keybindings.json	~/.claude/keybindings.json	bootstrap-only

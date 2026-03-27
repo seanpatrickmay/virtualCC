@@ -3,7 +3,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
-    git curl zsh fuse3 libfuse2t64 python3
+    git curl zsh fuse3 libfuse2t64 python3 jq
 
 RUN useradd -m -s /usr/bin/zsh dev
 
