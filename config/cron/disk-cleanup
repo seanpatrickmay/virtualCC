@@ -21,14 +21,14 @@ mkdir -p "$LOG_DIR"
     # Old npm tmp files
     rm -rf "$HOME/.npm/_cacache/tmp" 2>/dev/null && echo "Cleaned npm tmp"
 
-    # Packer compiled files (regenerated on next nvim start)
-    # Don't delete — just noting it exists
-
     # Old log files beyond what logrotate keeps
-    find "$LOG_DIR" -name "*.log.*.gz" -mtime +30 -delete 2>/dev/null && echo "Cleaned old compressed logs"
+    find "$LOG_DIR" -name "*.log.*.gz" -type f -mtime +30 -delete 2>/dev/null && echo "Cleaned old compressed logs"
 
-    # Temp files older than 7 days
-    find /tmp -user "$(whoami)" -mtime +7 -delete 2>/dev/null && echo "Cleaned old tmp files"
+    # Temp files older than 30 days (safe for long-running Claude sessions)
+    find /tmp -user "$(whoami)" -type f -mtime +30 -delete 2>/dev/null && echo "Cleaned old tmp files"
+
+    # Old backups beyond 7-day retention
+    find "$HOME/.local/backups" -name "vcc-backup-*.tar.gz" -type f -mtime +7 -delete 2>/dev/null && echo "Cleaned old backups"
 
     echo "After: $(df -h / | awk 'NR==2 {print $4}') free"
     echo "=== Done: $(date) ==="
