@@ -1,31 +1,47 @@
 # VCC: Auto-attach to tmux BEFORE .zshrc runs.
 # Must happen before p10k instant prompt captures the terminal.
-# Uses exec so detaching from tmux also ends the SSH session.
 #
-# Mobile detection: if terminal is narrow (< 120 cols), auto-zoom
+# Reconnection robustness:
+#   - Uses -d flag to detach other clients (fixes stale sessions after SSH drop)
+#   - Handles terminal size mismatch (tmux resizes to last-attached client)
+#   - Falls back to plain shell if tmux is broken (no exec = no disconnect)
+#   - Handles stale tmux server socket
+#
+# Mobile detection: if terminal is narrow (< 160 cols), auto-zoom
 # the current pane so you get a single full-screen view. Desktop
-# users keep the 2x2 grid. The zoomed pane is still part of the
-# same session — Ctrl+B z toggles zoom on/off.
+# users keep the 2x2 grid. 160 = threshold where each pane gets 80+ cols.
 
 if [[ -z "$TMUX" && -n "$SSH_CONNECTION" && -o interactive ]]; then
     _vcc_attach() {
+        # If tmux server is dead but socket lingers, clean up
+        if ! tmux list-sessions &>/dev/null; then
+            tmux kill-server 2>/dev/null || true
+            sleep 0.3
+        fi
+
+        # Ensure session exists
         if ! tmux has-session -t vcc 2>/dev/null; then
             if [[ -x /home/dev/.local/bin/tmux-session.sh ]]; then
                 /home/dev/.local/bin/tmux-session.sh
             else
+                echo "WARNING: tmux-session.sh not found. Starting plain shell."
                 return 1
             fi
         fi
 
         # Detect narrow terminal (phone/tablet) and auto-zoom
         local cols
-        cols=$(tput cols 2>/dev/null || echo 120)
-        if [[ "$cols" -lt 120 ]]; then
-            # Attach and immediately zoom the active pane
-            exec tmux attach-session -t vcc \; resize-pane -Z
+        cols=$(tput cols 2>/dev/null || echo 160)
+
+        # Attach with -d to detach other clients (fixes stale sessions + size mismatch)
+        # Fall back to plain shell if attach fails
+        if [[ "$cols" -lt 160 ]]; then
+            tmux attach-session -d -t vcc \; resize-pane -Z && exit
         else
-            exec tmux attach-session -t vcc
+            tmux attach-session -d -t vcc && exit
         fi
+
+        echo "WARNING: Could not attach to tmux session 'vcc'. Starting plain shell."
     }
     _vcc_attach
 fi
