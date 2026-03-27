@@ -1,9 +1,11 @@
 #!/bin/bash
 # Self-update: pull latest virtualCC repo and re-apply configs.
 # Runs as dev cron (daily). Safe to run manually too.
-# Idempotent — only copies files if repo pull succeeds.
+# Reads config/manifest.txt for file installation.
+# Uses jq to merge JSON configs (preserves user overrides).
 
 LOG_DIR="$HOME/.local/log/cron"
+SENTINEL="$LOG_DIR/vcc-update-failed"
 mkdir -p "$LOG_DIR"
 
 VCCDIR="$HOME/.local/share/virtualCC"
@@ -22,40 +24,58 @@ VCCDIR="$HOME/.local/share/virtualCC"
     # Pull latest (ff-only to avoid conflicts)
     if ! git pull --ff-only; then
         echo "WARNING: git pull --ff-only failed. Manual intervention needed."
+        touch "$SENTINEL"
         echo "=== Done: $(date) ==="
         exit 1
     fi
 
-    # Re-apply config files that bootstrap installs as copies
     echo "Applying updated configs..."
 
-    # Shell configs
-    cp "$VCCDIR/config/zshrc.local" ~/.zshrc.local
-    cp "$VCCDIR/config/zprofile.local" ~/.zprofile.local
+    # Read manifest and install files
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        local_src=$(echo "$line" | awk '{print $1}')
+        local_dest=$(echo "$line" | awk '{print $2}')
+        local_mode=$(echo "$line" | awk '{print $3}')
+        local_dest="${local_dest/#\~/$HOME}"
 
-    # Cron scripts
-    cp "$VCCDIR/config/cron/update-claude" ~/.local/bin/update-claude
-    cp "$VCCDIR/config/cron/sync-dotfiles" ~/.local/bin/sync-dotfiles
-    cp "$VCCDIR/config/cron/vcc-update" ~/.local/bin/vcc-update
-    cp "$VCCDIR/config/cron/tmux-watchdog" ~/.local/bin/tmux-watchdog
-    cp "$VCCDIR/config/cron/disk-cleanup" ~/.local/bin/disk-cleanup
-    cp "$VCCDIR/config/health-check.sh" ~/.local/bin/health-check
-    chmod +x ~/.local/bin/update-claude ~/.local/bin/sync-dotfiles ~/.local/bin/vcc-update ~/.local/bin/tmux-watchdog ~/.local/bin/disk-cleanup ~/.local/bin/health-check
+        if [ ! -f "$VCCDIR/$local_src" ]; then
+            echo "WARNING: $local_src not found in repo, skipping"
+            continue
+        fi
 
-    # tmux session script
-    cp "$VCCDIR/config/tmux-session.sh" ~/.local/bin/tmux-session.sh
-    chmod +x ~/.local/bin/tmux-session.sh
+        mkdir -p "$(dirname "$local_dest")"
 
-    # Claude Code config
-    mkdir -p ~/.claude
-    cp "$VCCDIR/config/claude/settings.json" ~/.claude/settings.json
-    cp "$VCCDIR/config/claude/mcp_config.json" ~/.claude/mcp_config.json
-    cp "$VCCDIR/config/claude/CLAUDE.md" ~/.claude/CLAUDE.md
-    cp "$VCCDIR/config/claude/keybindings.json" ~/.claude/keybindings.json
+        case "$local_mode" in
+            json-merge)
+                # Merge repo defaults with user's existing config (user wins)
+                if [ -f "$local_dest" ] && command -v jq &>/dev/null; then
+                    if jq -s '.[0] * .[1]' "$VCCDIR/$local_src" "$local_dest" > "$local_dest.tmp" 2>/dev/null; then
+                        mv "$local_dest.tmp" "$local_dest"
+                    else
+                        rm -f "$local_dest.tmp"
+                        cp "$VCCDIR/$local_src" "$local_dest"
+                    fi
+                else
+                    cp "$VCCDIR/$local_src" "$local_dest"
+                fi
+                ;;
+            bootstrap-only)
+                # Only install if file doesn't exist (never overwrite user changes)
+                [ -f "$local_dest" ] || cp "$VCCDIR/$local_src" "$local_dest"
+                ;;
+            +x)
+                # Atomic write for executables (prevents self-overwrite mid-execution)
+                cp "$VCCDIR/$local_src" "$local_dest.tmp" && mv "$local_dest.tmp" "$local_dest"
+                chmod +x "$local_dest"
+                ;;
+            *)
+                cp "$VCCDIR/$local_src" "$local_dest.tmp" && mv "$local_dest.tmp" "$local_dest"
+                ;;
+        esac
+    done < "$VCCDIR/config/manifest.txt"
 
-    # Log rotation
-    cp "$VCCDIR/config/logrotate.conf" ~/.config/logrotate.conf
-
+    rm -f "$SENTINEL"
     echo "Configs applied."
     echo "=== Done: $(date) ==="
 } >> "$LOG_DIR/vcc-update.log" 2>&1

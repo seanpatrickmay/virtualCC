@@ -28,13 +28,63 @@ DOTFILES_URL="https://github.com/seanpatrickmay/dotfiles.git"
 DEV_USER="dev"
 DEV_HOME="/home/$DEV_USER"
 DEV_PASSWORD="${DEV_PASSWORD:-$(openssl rand -base64 32)}"
+NVIM_VERSION="v0.11.4"
+NVM_VERSION="v0.40.1"
+
+# Step counter (auto-incrementing)
+STEP=0; TOTAL=12
+step() { STEP=$((STEP + 1)); echo "[$STEP/$TOTAL] $1"; }
+
+# Install files from manifest. Reads config/manifest.txt and copies files.
+# Usage: install_manifest <manifest_path> <home_dir> <mode_filter>
+install_manifest() {
+    local manifest="$1" home="$2" filter="$3" vccdir="$4"
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        # Parse tab or multi-space separated fields
+        local src dest mode
+        src=$(echo "$line" | awk '{print $1}')
+        dest=$(echo "$line" | awk '{print $2}')
+        mode=$(echo "$line" | awk '{print $3}')
+        dest="${dest/#\~/$home}"
+        [[ "$mode" != "$filter" ]] && continue
+
+        local src_path="$vccdir/$src"
+        [ -f "$src_path" ] || continue
+        mkdir -p "$(dirname "$dest")"
+
+        case "$mode" in
+            json-merge)
+                if [ -f "$dest" ] && command -v jq &>/dev/null; then
+                    if jq -s '.[0] * .[1]' "$src_path" "$dest" > "$dest.tmp" 2>/dev/null; then
+                        mv "$dest.tmp" "$dest"
+                    else
+                        rm -f "$dest.tmp"
+                        cp "$src_path" "$dest"
+                    fi
+                else
+                    cp "$src_path" "$dest"
+                fi
+                ;;
+            bootstrap-only)
+                [ -f "$dest" ] || cp "$src_path" "$dest"
+                ;;
+            +x)
+                cp "$src_path" "$dest"
+                chmod +x "$dest"
+                ;;
+            *)
+                cp "$src_path" "$dest"
+                ;;
+        esac
+    done < "$manifest"
+}
 
 echo "========================================="
 echo "VirtualCC Bootstrap — Phase 1: System Setup"
 echo "========================================="
 
-# Step 1: System packages
-echo "[1/12] Installing system packages..."
+step "Installing system packages..."
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
     -o Dpkg::Options::="--force-confdef" \
@@ -43,7 +93,6 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
     git curl build-essential zsh tmux unzip python3 openssl ufw fail2ban at logrotate mosh jq
 
 # Install neovim from GitHub releases (apt version is too old for plugins)
-NVIM_VERSION="v0.11.4"
 ARCH=$(uname -m)
 if [ "$ARCH" = "x86_64" ]; then
     NVIM_ARCH="linux-x86_64"
@@ -93,21 +142,26 @@ if ! swapon --show | grep -q "/swapfile"; then
 fi
 
 # Step 2: Firewall
-echo "[2/12] Configuring firewall..."
+step "Configuring firewall..."
 ufw allow ssh
 ufw allow 60000:60010/udp  # mosh (UDP for mobile connections)
 ufw --force enable
 
-# Step 3: Create dev user
-echo "[3/12] Creating dev user..."
+# Step 3: Create dev user (idempotent — safe to re-run)
+step "Creating dev user..."
 if ! id "$DEV_USER" &>/dev/null; then
     useradd -m -s /usr/bin/zsh "$DEV_USER"
-    usermod -aG sudo "$DEV_USER"
-    echo "$DEV_USER:$DEV_PASSWORD" | chpasswd
 fi
+# Always ensure correct group, shell, and password (fixes re-runs with existing user)
+usermod -aG sudo "$DEV_USER"
+chsh -s /usr/bin/zsh "$DEV_USER" 2>/dev/null || true
+echo "$DEV_USER:$DEV_PASSWORD" | chpasswd
+# Save password for reference (root-only readable)
+echo "$DEV_PASSWORD" > /root/.vcc-dev-password
+chmod 600 /root/.vcc-dev-password
 
 # Copy SSH keys from root to dev
-echo "[3b/12] Copying SSH keys to dev user..."
+echo "  Copying SSH keys to dev user..."
 mkdir -p "$DEV_HOME/.ssh"
 cp /root/.ssh/authorized_keys "$DEV_HOME/.ssh/authorized_keys"
 chown -R "$DEV_USER:$DEV_USER" "$DEV_HOME/.ssh"
@@ -125,17 +179,17 @@ sudo -H -u "$DEV_USER" bash -c "mkdir -p '$DEV_HOME/.local/share' && git clone '
     sudo -H -u "$DEV_USER" bash -c "cd '$VCCDIR' && git pull"
 
 # Step 4: Node.js via nvm
-echo "[4/12] Installing nvm and Node.js..."
-sudo -H -u "$DEV_USER" bash -c '
-    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-    export NVM_DIR="$HOME/.nvm"
+step "Installing nvm and Node.js..."
+sudo -H -u "$DEV_USER" bash -c "
+    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/$NVM_VERSION/install.sh | bash
+    export NVM_DIR=\$HOME/.nvm
     # shellcheck source=/dev/null
-    source "$NVM_DIR/nvm.sh"
+    source \$NVM_DIR/nvm.sh
     nvm install --lts
-'
+"
 
 # Step 5: Claude Code
-echo "[5/12] Installing Claude Code..."
+step "Installing Claude Code..."
 sudo -H -u "$DEV_USER" bash -c '
     export NVM_DIR="$HOME/.nvm"
     # shellcheck source=/dev/null
@@ -143,20 +197,16 @@ sudo -H -u "$DEV_USER" bash -c '
     npm install -g @anthropic-ai/claude-code tree-sitter-cli
 '
 
-# Step 5b: Claude Code config
-echo "[5b/12] Installing Claude Code config..."
-sudo -H -u "$DEV_USER" bash -c "
-    mkdir -p ~/.claude
-    cp '$VCCDIR/config/claude/settings.json' ~/.claude/settings.json
-    cp '$VCCDIR/config/claude/mcp_config.json' ~/.claude/mcp_config.json
-    cp '$VCCDIR/config/claude/CLAUDE.md' ~/.claude/CLAUDE.md
-    cp '$VCCDIR/config/claude/keybindings.json' ~/.claude/keybindings.json
-    # Install env template if no .env exists yet (don't overwrite user values)
-    [ -f ~/.env ] || cp '$VCCDIR/config/env.template' ~/.env
-"
+# Step 5b: Claude Code config (via manifest — JSON files merge, others bootstrap-only)
+echo "  Installing Claude Code config..."
+sudo -H -u "$DEV_USER" mkdir -p "$DEV_HOME/.claude"
+install_manifest "$VCCDIR/config/manifest.txt" "$DEV_HOME" "json-merge" "$VCCDIR"
+install_manifest "$VCCDIR/config/manifest.txt" "$DEV_HOME" "bootstrap-only" "$VCCDIR"
+# Install env template if no .env exists yet (don't overwrite user values)
+[ -f "$DEV_HOME/.env" ] || sudo -H -u "$DEV_USER" cp "$VCCDIR/config/env.template" "$DEV_HOME/.env"
 
 # Step 6: Oh My Zsh + Powerlevel10k
-echo "[6/12] Installing Oh My Zsh and Powerlevel10k..."
+step "Installing Oh My Zsh and Powerlevel10k..."
 # Download installer first, then run as dev user to avoid $() expanding as root
 curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh -o /tmp/install-omz.sh
 sudo -H -u "$DEV_USER" RUNZSH=no CHSH=no bash /tmp/install-omz.sh || true
@@ -175,7 +225,7 @@ sudo -H -u "$DEV_USER" bash -c '
 ' 2>/dev/null || true
 
 # Step 7: Dotfiles
-echo "[7/12] Installing dotfiles..."
+step "Installing dotfiles..."
 sudo -H -u "$DEV_USER" bash -c "git clone '$DOTFILES_URL' '$DEV_HOME/dotfiles'" 2>/dev/null || \
     sudo -H -u "$DEV_USER" bash -c "cd '$DEV_HOME/dotfiles' && git pull"
 
@@ -195,7 +245,7 @@ sudo -H -u "$DEV_USER" bash -c '
 '
 
 # Install nvim plugins via git clone (PackerSync is unreliable in headless mode)
-echo "[7b/12] Installing nvim plugins..."
+echo "  Installing nvim plugins..."
 sudo -H -u "$DEV_USER" bash -c '
     D="$HOME/.local/share/nvim/site/pack/packer/start"
     mkdir -p "$D"
@@ -221,7 +271,7 @@ sudo -H -u "$DEV_USER" bash -c 'timeout 10 nvim --headless -c "PackerCompile" -c
 # Pre-install treesitter parsers (avoids compile delay on first file open)
 # Requires tree-sitter-cli (installed with Claude Code above) and gcc (build-essential).
 # TSInstall runs async — sleep gives time for compilation before quitting.
-echo "[7c/12] Installing treesitter parsers..."
+echo "  Installing treesitter parsers..."
 sudo -H -u "$DEV_USER" bash -c '
     export NVM_DIR="$HOME/.nvm"
     # shellcheck source=/dev/null
@@ -240,7 +290,7 @@ sudo -H -u "$DEV_USER" bash -c '
 '
 
 # Step 8: tmux systemd service
-echo "[8/12] Setting up tmux auto-start service..."
+step "Setting up tmux auto-start service..."
 sudo -H -u "$DEV_USER" bash -c "
     mkdir -p ~/.local/bin
     cp '$VCCDIR/config/tmux-session.sh' ~/.local/bin/tmux-session.sh
@@ -257,7 +307,7 @@ loginctl enable-linger "$DEV_USER"
 mkdir -p "/run/user/$DEV_UID"
 chown "$DEV_USER:$DEV_USER" "/run/user/$DEV_UID"
 
-echo "[8/12] Waiting for systemd user bus socket..."
+echo "  Waiting for systemd user bus socket..."
 for _ in $(seq 1 30); do
     [ -S "/run/user/$DEV_UID/bus" ] && break
     sleep 1
@@ -273,13 +323,12 @@ else
         systemctl --user enable tmux-vcc.service
         systemctl --user start tmux-vcc.service
     "
-    echo "[8/12] tmux service started."
+    echo "  tmux service started."
 fi
 
-# Step 9: Install shell config
-echo "[9/12] Installing zshrc.local and zprofile.local..."
-sudo -H -u "$DEV_USER" bash -c "cp '$VCCDIR/config/zshrc.local' ~/.zshrc.local"
-sudo -H -u "$DEV_USER" bash -c "cp '$VCCDIR/config/zprofile.local' ~/.zprofile.local"
+# Step 9: Install shell config + logrotate (via manifest)
+step "Installing shell configs..."
+install_manifest "$VCCDIR/config/manifest.txt" "$DEV_HOME" "644" "$VCCDIR"
 
 # Ensure .zprofile sources .zprofile.local
 sudo -H -u "$DEV_USER" bash -c '
@@ -293,27 +342,13 @@ echo "VirtualCC Bootstrap — Phase 3: Finalization"
 echo "========================================="
 
 # Step 10: Cron jobs
-echo "[10/12] Installing cron jobs..."
+step "Installing cron jobs..."
 
-# Create log directory
-sudo -H -u "$DEV_USER" bash -c "mkdir -p ~/.local/log/cron"
+# Create required directories
+sudo -H -u "$DEV_USER" bash -c "mkdir -p ~/.local/bin ~/.local/log/cron ~/.local/state ~/.local/backups ~/.config"
 
-# Install cron wrapper scripts and health check
-sudo -H -u "$DEV_USER" bash -c "
-    cp '$VCCDIR/config/cron/update-claude' ~/.local/bin/update-claude
-    cp '$VCCDIR/config/cron/sync-dotfiles' ~/.local/bin/sync-dotfiles
-    cp '$VCCDIR/config/cron/vcc-update' ~/.local/bin/vcc-update
-    cp '$VCCDIR/config/cron/tmux-watchdog' ~/.local/bin/tmux-watchdog
-    cp '$VCCDIR/config/cron/disk-cleanup' ~/.local/bin/disk-cleanup
-    cp '$VCCDIR/config/health-check.sh' ~/.local/bin/health-check
-    chmod +x ~/.local/bin/update-claude ~/.local/bin/sync-dotfiles ~/.local/bin/vcc-update ~/.local/bin/tmux-watchdog ~/.local/bin/disk-cleanup ~/.local/bin/health-check
-"
-
-# Install log rotation config
-sudo -H -u "$DEV_USER" bash -c "
-    mkdir -p ~/.config ~/.local/state
-    cp '$VCCDIR/config/logrotate.conf' ~/.config/logrotate.conf
-"
+# Install all executable scripts from manifest
+install_manifest "$VCCDIR/config/manifest.txt" "$DEV_HOME" "+x" "$VCCDIR"
 
 # Root crontab: weekly system update (install to /usr/local/sbin for stable path)
 cp "$VCCDIR/config/cron/update-system" /usr/local/sbin/vcc-update-system
@@ -327,16 +362,17 @@ set -e
 # Dev user crontab
 # Note: all variables are expanded in the root shell (double-quoted heredoc).
 # The crontab receives the resolved paths, not variable references.
-DEV_CRON_CLAUDE="30 3 * * 0 $DEV_HOME/.local/bin/update-claude"
-DEV_CRON_DOTFILES="0 4 * * * $DEV_HOME/.local/bin/sync-dotfiles"
+DEV_CRON_CLAUDE="30 3 * * 0 flock -n /tmp/vcc-update-claude.lock $DEV_HOME/.local/bin/update-claude"
+DEV_CRON_DOTFILES="0 4 * * * flock -n /tmp/vcc-sync-dotfiles.lock $DEV_HOME/.local/bin/sync-dotfiles"
 DEV_CRON_LOGROTATE="0 5 * * 0 /usr/sbin/logrotate --state $DEV_HOME/.local/state/logrotate.status $DEV_HOME/.config/logrotate.conf"
 DEV_CRON_HEALTH="0 */6 * * * $DEV_HOME/.local/bin/health-check >> $DEV_HOME/.local/log/cron/health-check.log 2>&1"
-DEV_CRON_VCCUPDATE="30 4 * * * $DEV_HOME/.local/bin/vcc-update"
-DEV_CRON_CLEANUP="0 2 * * 0 $DEV_HOME/.local/bin/disk-cleanup"
+DEV_CRON_VCCUPDATE="30 4 * * * flock -n /tmp/vcc-update.lock $DEV_HOME/.local/bin/vcc-update"
+DEV_CRON_CLEANUP="0 2 * * 0 flock -n /tmp/vcc-disk-cleanup.lock $DEV_HOME/.local/bin/disk-cleanup"
 DEV_CRON_WATCHDOG="*/5 * * * * $DEV_HOME/.local/bin/tmux-watchdog"
+DEV_CRON_BACKUP="30 5 * * * flock -n /tmp/vcc-backup.lock $DEV_HOME/.local/bin/backup"
 set +e
 sudo -H -u "$DEV_USER" bash -c "
-    (crontab -l 2>/dev/null | grep -v 'update-claude' | grep -v 'sync-dotfiles' | grep -v 'logrotate' | grep -v 'health-check' | grep -v 'vcc-update' | grep -v 'disk-cleanup' | grep -v 'tmux-watchdog' | grep -v '^SHELL=' | grep -v '^HOME='
+    (crontab -l 2>/dev/null | grep -v 'update-claude' | grep -v 'sync-dotfiles' | grep -v 'logrotate' | grep -v 'health-check' | grep -v 'vcc-update' | grep -v 'disk-cleanup' | grep -v 'tmux-watchdog' | grep -v 'backup' | grep -v '^SHELL=' | grep -v '^HOME='
      echo \"SHELL=/bin/bash\"
      echo \"HOME=$DEV_HOME\"
      echo \"$DEV_CRON_CLAUDE\"
@@ -346,12 +382,13 @@ sudo -H -u "$DEV_USER" bash -c "
      echo \"$DEV_CRON_VCCUPDATE\"
      echo \"$DEV_CRON_CLEANUP\"
      echo \"$DEV_CRON_WATCHDOG\"
+     echo \"$DEV_CRON_BACKUP\"
     ) | crontab -
 "
 set -e
 
 # Step 11: SSH hardening (last step)
-echo "[11/12] Hardening SSH..."
+step "Hardening SSH..."
 
 # Pre-flight: verify dev user has valid SSH key
 if ! ssh-keygen -l -f "$DEV_HOME/.ssh/authorized_keys" &>/dev/null; then
@@ -375,7 +412,7 @@ echo "rm -f /etc/ssh/sshd_config.d/vcc.conf && systemctl restart ssh" | at now +
 systemctl restart ssh
 
 # Step 12: Health check
-echo "[12/12] Running health check..."
+step "Running health check..."
 sudo -H -u "$DEV_USER" bash -c "
     export XDG_RUNTIME_DIR=/run/user/$DEV_UID
     $DEV_HOME/.local/bin/health-check
@@ -387,16 +424,44 @@ echo "VirtualCC Bootstrap Complete!"
 echo "========================================="
 echo ""
 VPS_IP=$(hostname -I | awk '{print $1}')
-echo "IMPORTANT: SSH hardening has a 5-minute safety rollback."
+echo "Dev user password: $DEV_PASSWORD"
+echo "  (Also saved to /root/.vcc-dev-password)"
+echo ""
+echo "--- SSH Hardening (5-minute safety rollback) ---"
 echo "  1. Open a NEW terminal and test: ssh dev@$VPS_IP"
 echo "  2. If it works, cancel the rollback:  sudo atrm \$(atq | awk '{print \$1}')"
-echo "  3. You'll auto-attach to tmux session 'vcc' with 4 panes"
-echo "  4. Run 'claude' to authenticate Claude Code"
-echo "  5. Edit ~/.env to set API keys (GITHUB_TOKEN, BRAVE_API_KEY)"
+echo "  3. If you can't SSH in, wait 5 minutes — it auto-reverts."
 echo ""
-echo "From a phone (mosh — survives network drops):"
+echo "--- Next Steps ---"
+echo "  1. You'll auto-attach to tmux session 'vcc' with 4 panes"
+echo "  2. Run 'claude' to authenticate Claude Code (or use 'ccd' alias)"
+echo "  3. Run 'env-edit' to set API keys (GITHUB_TOKEN, BRAVE_API_KEY)"
+echo "  4. Use 'clone <repo>' to clone projects into ~/projects/"
+echo ""
+echo "--- Add to ~/.ssh/config on your local machine ---"
+echo "Host vcc"
+echo "    HostName $VPS_IP"
+echo "    User dev"
+echo "    ServerAliveInterval 15"
+echo "    ServerAliveCountMax 2"
+echo "    IdentityFile ~/.ssh/id_ed25519"
+echo ""
+echo "--- Mobile access (mosh — survives network drops) ---"
 echo "  mosh dev@$VPS_IP"
-echo "  (Auto-zooms to single pane. Use 'p 0' 'p 1' etc. to switch panes)"
+echo "  Auto-zooms to single pane. Use 'p' to list panes, 'p 0' to switch."
+echo "  Install mosh: brew install mosh (macOS) | Blink Shell (iOS) | Termux (Android)"
 echo ""
-echo "If you can't SSH in, wait 5 minutes — the config will auto-revert."
+echo "--- Port forwarding (for web dev) ---"
+echo "  ssh -L 3000:localhost:3000 vcc"
+echo ""
+echo "--- Available commands ---"
+echo "  cc/ccd/ccr/ccrd  Claude Code aliases (with/without permissions skip)"
+echo "  status            Run health check"
+echo "  logs              View cron job logs"
+echo "  p / p N           List panes / switch to pane N"
+echo "  d                 Detach from tmux (safe disconnect)"
+echo "  bye               Kill session and disconnect (with confirmation)"
+echo "  mobile / desktop  Toggle single-pane / 2x2 grid mode"
+echo "  clone <repo>      Clone into ~/projects/"
+echo "  env-edit          Edit ~/.env"
 echo "========================================="
