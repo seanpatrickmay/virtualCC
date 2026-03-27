@@ -5,6 +5,9 @@
 
 set -uo pipefail
 
+# Ensure systemctl --user works from cron (needs XDG_RUNTIME_DIR)
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -200,5 +203,21 @@ else
     LABEL="CRITICAL"
 fi
 echo "=== Status: $LABEL ==="
+
+# === Optional: Webhook alert on degraded/critical ===
+if [[ "$STATUS" -gt 0 && -n "${VCC_ALERT_WEBHOOK:-}" ]]; then
+    curl -s -m 5 -H "Content-Type: application/json" \
+        -d "{\"content\":\"VCC Health: $LABEL on $(hostname -f 2>/dev/null || hostname) — $(date)\"}" \
+        "$VCC_ALERT_WEBHOOK" 2>/dev/null || true
+fi
+
+# === Optional: Uptime ping (e.g., healthchecks.io) ===
+if [[ -n "${VCC_HEALTHCHECK_PING_URL:-}" ]]; then
+    if [[ "$STATUS" -eq 0 ]]; then
+        curl -fsS -m 5 --retry 3 "$VCC_HEALTHCHECK_PING_URL" 2>/dev/null || true
+    else
+        curl -fsS -m 5 --retry 3 "$VCC_HEALTHCHECK_PING_URL/fail" 2>/dev/null || true
+    fi
+fi
 
 exit "$STATUS"
