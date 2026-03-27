@@ -1,20 +1,35 @@
 #!/bin/bash
 # Weekly Claude Code update. Runs as dev cron (Sunday 3:30am).
 # Must source nvm explicitly — cron has minimal environment.
-# Note: nvm.sh is not compatible with set -e (it exits non-zero internally),
-# so we disable it for the source and re-enable after.
+# Skips update if Claude is actively running to prevent mid-session disruption.
 
 LOG_DIR="$HOME/.local/log/cron"
+SENTINEL="$LOG_DIR/update-claude-failed"
 mkdir -p "$LOG_DIR"
 
 {
     echo "=== Claude Code update: $(date) ==="
+
+    # Don't update while Claude is running
+    if pgrep -f "claude" >/dev/null 2>&1; then
+        echo "Claude Code is running, skipping update"
+        echo "=== Done: $(date) ==="
+        exit 0
+    fi
+
     export NVM_DIR="$HOME/.nvm"
     set +e
     # shellcheck source=/dev/null
     source "$NVM_DIR/nvm.sh"
     set -e
-    npm update -g @anthropic-ai/claude-code
+
+    if npm update -g @anthropic-ai/claude-code; then
+        rm -f "$SENTINEL"
+    else
+        touch "$SENTINEL"
+        echo "WARNING: npm update failed"
+    fi
+
     # Note: gh CLI is updated by the root update-system cron (apt-get upgrade)
     echo "=== Done: $(date) ==="
 } >> "$LOG_DIR/update-claude.log" 2>&1
