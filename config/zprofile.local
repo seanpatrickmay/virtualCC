@@ -44,4 +44,5 @@ if [[ -z "$TMUX" && -n "$SSH_CONNECTION" && -o interactive ]]; then
         echo "WARNING: Could not attach to tmux session 'vcc'. Starting plain shell."
     }
     _vcc_attach
+    unset -f _vcc_attach
 fi

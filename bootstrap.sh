@@ -36,9 +36,10 @@ STEP=0; TOTAL=12
 step() { STEP=$((STEP + 1)); echo "[$STEP/$TOTAL] $1"; }
 
 # Install files from manifest. Reads config/manifest.txt and copies files.
-# Usage: install_manifest <manifest_path> <home_dir> <mode_filter>
+# Usage: install_manifest <manifest_path> <home_dir> <mode_filter> <vccdir> [owner]
+# When owner is set, chown each installed file (needed when running as root for dev user's home)
 install_manifest() {
-    local manifest="$1" home="$2" filter="$3" vccdir="$4"
+    local manifest="$1" home="$2" filter="$3" vccdir="$4" owner="${5:-}"
     while IFS= read -r line; do
         [[ -z "$line" || "$line" == \#* ]] && continue
         # Parse tab or multi-space separated fields
@@ -77,6 +78,8 @@ install_manifest() {
                 cp "$src_path" "$dest"
                 ;;
         esac
+        # Fix ownership when running as root for dev user's files
+        [[ -n "$owner" ]] && chown "$owner" "$dest" 2>/dev/null || true
     done < "$manifest"
 }
 
@@ -200,8 +203,8 @@ sudo -H -u "$DEV_USER" bash -c '
 # Step 5b: Claude Code config (via manifest — JSON files merge, others bootstrap-only)
 echo "  Installing Claude Code config..."
 sudo -H -u "$DEV_USER" mkdir -p "$DEV_HOME/.claude"
-install_manifest "$VCCDIR/config/manifest.txt" "$DEV_HOME" "json-merge" "$VCCDIR"
-install_manifest "$VCCDIR/config/manifest.txt" "$DEV_HOME" "bootstrap-only" "$VCCDIR"
+install_manifest "$VCCDIR/config/manifest.txt" "$DEV_HOME" "json-merge" "$VCCDIR" "$DEV_USER:$DEV_USER"
+install_manifest "$VCCDIR/config/manifest.txt" "$DEV_HOME" "bootstrap-only" "$VCCDIR" "$DEV_USER:$DEV_USER"
 # Install env template if no .env exists yet (don't overwrite user values)
 [ -f "$DEV_HOME/.env" ] || sudo -H -u "$DEV_USER" cp "$VCCDIR/config/env.template" "$DEV_HOME/.env"
 
@@ -328,7 +331,7 @@ fi
 
 # Step 9: Install shell config + logrotate (via manifest)
 step "Installing shell configs..."
-install_manifest "$VCCDIR/config/manifest.txt" "$DEV_HOME" "644" "$VCCDIR"
+install_manifest "$VCCDIR/config/manifest.txt" "$DEV_HOME" "644" "$VCCDIR" "$DEV_USER:$DEV_USER"
 
 # Ensure .zprofile sources .zprofile.local
 sudo -H -u "$DEV_USER" bash -c '
@@ -348,7 +351,7 @@ step "Installing cron jobs..."
 sudo -H -u "$DEV_USER" bash -c "mkdir -p ~/.local/bin ~/.local/log/cron ~/.local/state ~/.local/backups ~/.config"
 
 # Install all executable scripts from manifest
-install_manifest "$VCCDIR/config/manifest.txt" "$DEV_HOME" "+x" "$VCCDIR"
+install_manifest "$VCCDIR/config/manifest.txt" "$DEV_HOME" "+x" "$VCCDIR" "$DEV_USER:$DEV_USER"
 
 # Root crontab: weekly system update (install to /usr/local/sbin for stable path)
 cp "$VCCDIR/config/cron/update-system" /usr/local/sbin/vcc-update-system
@@ -372,7 +375,7 @@ DEV_CRON_WATCHDOG="*/5 * * * * $DEV_HOME/.local/bin/tmux-watchdog"
 DEV_CRON_BACKUP="30 5 * * * flock -n /tmp/vcc-backup.lock $DEV_HOME/.local/bin/backup"
 set +e
 sudo -H -u "$DEV_USER" bash -c "
-    (crontab -l 2>/dev/null | grep -v 'update-claude' | grep -v 'sync-dotfiles' | grep -v 'logrotate' | grep -v 'health-check' | grep -v 'vcc-update' | grep -v 'disk-cleanup' | grep -v 'tmux-watchdog' | grep -v 'backup' | grep -v '^SHELL=' | grep -v '^HOME='
+    (crontab -l 2>/dev/null | grep -v 'update-claude' | grep -v 'sync-dotfiles' | grep -v 'logrotate' | grep -v 'health-check' | grep -v 'vcc-update' | grep -v 'disk-cleanup' | grep -v 'tmux-watchdog' | grep -v '\.local/bin/backup' | grep -v '^SHELL=' | grep -v '^HOME='
      echo \"SHELL=/bin/bash\"
      echo \"HOME=$DEV_HOME\"
      echo \"$DEV_CRON_CLAUDE\"

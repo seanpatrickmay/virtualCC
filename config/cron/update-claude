@@ -10,8 +10,9 @@ mkdir -p "$LOG_DIR"
 {
     echo "=== Claude Code update: $(date) ==="
 
-    # Don't update while Claude is running
-    if pgrep -f "claude" >/dev/null 2>&1; then
+    # Don't update while Claude Code is running
+    # Use "node.*claude" to match Claude's Node.js process, not this script or grep itself
+    if pgrep -f "node.*claude" >/dev/null 2>&1; then
         echo "Claude Code is running, skipping update"
         echo "=== Done: $(date) ==="
         exit 0
