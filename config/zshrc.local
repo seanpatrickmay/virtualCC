@@ -11,38 +11,136 @@ if [[ -f ~/.env ]]; then
     done < ~/.env
 fi
 # gh CLI uses GH_TOKEN (set it from GITHUB_TOKEN if not already set)
-[[ -n "$GITHUB_TOKEN" && -z "$GH_TOKEN" ]] && export GH_TOKEN="$GITHUB_TOKEN"
+[[ -n "${GITHUB_TOKEN:-}" && -z "${GH_TOKEN:-}" ]] && export GH_TOKEN="$GITHUB_TOKEN"
 
 # Load nvm (dotfiles .zshrc overwrites nvm's auto-added lines)
 export NVM_DIR="$HOME/.nvm"
 [[ -s "$NVM_DIR/nvm.sh" ]] && source "$NVM_DIR/nvm.sh"
 
-# --- Login status (one-liner, only in pane 0 to avoid spam) ---
-if [[ "$(tmux display-message -p '#{pane_index}' 2>/dev/null)" == "0" ]]; then
-    _vcc_status() {
-        local disk mem warn=""
-        disk=$(df / 2>/dev/null | awk 'NR==2 {print $5}')
-        mem=$(free -m 2>/dev/null | awk '/Mem:/ {printf "%d/%dMB", $3, $2}')
-        panes=$(tmux list-panes -t vcc 2>/dev/null | wc -l | tr -d ' ')
-        [[ ! -f ~/.env ]] || ! grep -q 'GITHUB_TOKEN=.' ~/.env 2>/dev/null && warn=" | \033[33m⚠ ~/.env needs API keys\033[0m"
-        [[ -f ~/.local/log/cron/dotfiles-sync-failed ]] && warn="$warn | \033[33m⚠ dotfiles sync failed\033[0m"
-        echo -e "\033[90m[vcc] disk:${disk} mem:${mem} panes:${panes}${warn}\033[0m"
-    }
+# === Claude Code aliases ===
+alias cc='claude'
+alias ccd='claude --dangerously-skip-permissions'
+alias ccr='claude --resume'
+alias ccrd='claude --resume --dangerously-skip-permissions'
+alias ccp='claude --plan'
+alias ccs='claude status'
+alias cch='claude --help'
+
+# === Utility aliases ===
+alias c='claude'
+alias d='tmux detach-client'
+alias status='~/.local/bin/health-check'
+
+# === Login status ===
+_pane_idx=$(tmux display-message -p '#{pane_index}' 2>/dev/null || echo "?")
+
+_vcc_status() {
+    local disk mem warn=""
+    disk=$(df / 2>/dev/null | awk 'NR==2 {print $5}')
+    mem=$(free -m 2>/dev/null | awk '/Mem:/ {printf "%d/%dMB", $3, $2}')
+    panes=$(tmux list-panes -t vcc 2>/dev/null | wc -l | tr -d ' ')
+
+    # Check for warnings
+    [[ ! -f ~/.env ]] || ! grep -q 'GITHUB_TOKEN=.' ~/.env 2>/dev/null && warn=" | \033[33m⚠ run: env-edit\033[0m"
+    [[ -f ~/.local/log/cron/dotfiles-sync-failed ]] && warn="$warn | \033[33m⚠ dotfiles sync failed\033[0m"
+    [[ -f ~/.local/log/cron/vcc-update-failed ]] && warn="$warn | \033[33m⚠ vcc update failed\033[0m"
+    [[ -f ~/.local/log/cron/update-claude-failed ]] && warn="$warn | \033[33m⚠ claude update failed\033[0m"
+
+    # Reboot/recovery detection
+    local session_age=""
+    if [[ -f ~/.local/state/vcc-session-created ]]; then
+        local created now diff_min
+        created=$(date -r ~/.local/state/vcc-session-created +%s 2>/dev/null || echo 0)
+        now=$(date +%s)
+        diff_min=$(( (now - created) / 60 ))
+        if [[ "$diff_min" -lt 10 ]]; then
+            session_age=" | \033[36msession created ${diff_min}m ago\033[0m"
+        fi
+    fi
+
+    echo -e "\033[90m[vcc] disk:${disk} mem:${mem} panes:${panes}${warn}${session_age}\033[0m"
+}
+
+if [[ "$_pane_idx" == "0" ]]; then
     _vcc_status
-    unset -f _vcc_status
+else
+    echo -e "\033[90m[vcc:pane${_pane_idx}]\033[0m"
 fi
+unset -f _vcc_status
+unset _pane_idx
 
-# Kill tmux session and disconnect SSH
-bye() { tmux kill-session -t vcc 2>/dev/null; exit; }
+# === Shell functions ===
 
-# Quick pane switcher (works in zoomed mode — unzooms, switches, re-zooms)
-# Usage: p 0  p 1  p 2  p 3
+# Kill tmux session and disconnect (with confirmation)
+bye() {
+    if [[ -z "${TMUX:-}" ]]; then
+        echo "Not in a tmux session."
+        return 1
+    fi
+    echo -n "Kill all panes and disconnect? [y/N] "
+    read -r ans
+    [[ "$ans" == [yY] ]] && tmux kill-session -t vcc
+}
+
+# Quick pane switcher (works in zoomed mode)
+# No args: list panes. With arg: switch to that pane.
 p() {
-    local target="${1:-0}"
-    # Only unzoom if currently zoomed (resize-pane -Z is a toggle)
+    if [[ -z "${1:-}" ]]; then
+        tmux list-panes -t vcc -F '  #{pane_index}: #{pane_current_command} (#{pane_current_path})' 2>/dev/null
+        return
+    fi
+    local target="$1"
     if [[ "$(tmux display-message -p '#{window_zoomed_flag}')" == "1" ]]; then
         tmux resize-pane -Z
     fi
     tmux select-pane -t "$target"
     tmux resize-pane -Z
 }
+
+# Mobile/desktop mode switching
+mobile() {
+    if [[ -z "${TMUX:-}" ]]; then echo "Not in tmux."; return 1; fi
+    tmux resize-pane -Z 2>/dev/null
+}
+desktop() {
+    if [[ -z "${TMUX:-}" ]]; then echo "Not in tmux."; return 1; fi
+    [[ "$(tmux display-message -p '#{window_zoomed_flag}')" == "1" ]] && tmux resize-pane -Z
+    tmux select-layout -t vcc tiled
+}
+
+# Cron log viewer (usage: logs [num_lines])
+logs() {
+    local lines="${1:-5}"
+    for f in ~/.local/log/cron/*.log; do
+        [ -f "$f" ] || continue
+        echo "=== $(basename "$f" .log) ==="
+        tail -"$lines" "$f"
+        echo
+    done
+}
+
+# Edit environment variables
+env-edit() {
+    ${EDITOR:-nvim} ~/.env
+    echo "Restart your shell or run: source ~/.zshrc.local"
+}
+
+# Clone a project into ~/projects/
+clone() {
+    local repo="$1" dest="${2:-}"
+    if [[ -z "${repo:-}" ]]; then
+        echo "Usage: clone <repo> [dir]"
+        echo "  clone life-dashboard         -> github.com/seanpatrickmay/life-dashboard"
+        echo "  clone user/repo              -> github.com/user/repo"
+        echo "  clone https://github.com/... -> as-is"
+        return 1
+    fi
+    [[ "$repo" != */* ]] && repo="seanpatrickmay/$repo"
+    [[ "$repo" != https://* && "$repo" != git@* ]] && repo="https://github.com/$repo"
+    local name="${dest:-$(basename "$repo" .git)}"
+    mkdir -p ~/projects
+    git clone "$repo" ~/projects/"$name" && cd ~/projects/"$name"
+}
+
+# Source user customizations (never managed by vcc-update)
+[[ -f ~/.zshrc.user ]] && source ~/.zshrc.user
