@@ -14,6 +14,7 @@ SCRIPTS=(
     "config/cron/vcc-update"
     "config/cron/disk-cleanup"
     "config/cron/tmux-watchdog"
+    "config/cron/backup"
 )
 
 # Skip scripts that don't exist yet (allows running before all tasks complete)

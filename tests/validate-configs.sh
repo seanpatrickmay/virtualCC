@@ -34,6 +34,20 @@ done
 
 echo ""
 
+# --- Manifest source files exist ---
+echo "Manifest source files exist:"
+while IFS= read -r line; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    src=$(echo "$line" | awk '{print $1}')
+    if [ -f "$src" ]; then
+        check "$src" 0
+    else
+        check "$src: MISSING" 1
+    fi
+done < config/manifest.txt
+
+echo ""
+
 # --- Script existence ---
 echo "Scripts referenced in shellcheck.sh exist:"
 # shellcheck disable=SC2013
@@ -47,66 +61,54 @@ done
 
 echo ""
 
-# --- Bootstrap vs vcc-update consistency ---
-echo "Bootstrap/vcc-update install the same scripts:"
+# --- Nvim plugin list consistency (bootstrap vs Dockerfile) ---
+echo "Nvim plugin list consistency (bootstrap vs Dockerfile):"
+# Bootstrap uses 'clone user/repo' pattern for plugins
+BOOTSTRAP_PLUGINS=$(grep -oE 'clone [a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+' bootstrap.sh | sed 's/clone //' | sort)
+# Dockerfile clones plugins under PLUGIN_DIR
+DOCKER_PLUGINS=$(sed -n '/PLUGIN_DIR/,/^[^[:space:]]/p' Dockerfile.test | grep -oE 'github\.com/[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+' | sed 's|github\.com/||' | sort)
+if [ "$BOOTSTRAP_PLUGINS" = "$DOCKER_PLUGINS" ]; then
+    check "Plugin lists match" 0
+else
+    check "Plugin lists DIFFER" 1
+fi
 
-# Extract script names installed to ~/.local/bin from both files
-BOOTSTRAP_SCRIPTS=$(grep -o 'cp.*~/.local/bin/[a-z_-]*' bootstrap.sh | sed 's/.*~\/.local\/bin\///' | sort -u)
-UPDATE_SCRIPTS=$(grep -o 'cp.*~/.local/bin/[a-z_-]*' config/cron/vcc-update | sed 's/.*~\/.local\/bin\///' | sort -u)
+echo ""
 
-# Check for scripts in bootstrap but not in vcc-update
-for s in $BOOTSTRAP_SCRIPTS; do
-    if echo "$UPDATE_SCRIPTS" | grep -q "^${s}$"; then
-        check "  $s: synced" 0
-    else
-        check "  $s: in bootstrap but NOT in vcc-update" 1
-    fi
-done
-
-# Check for scripts in vcc-update but not in bootstrap
-for s in $UPDATE_SCRIPTS; do
-    if ! echo "$BOOTSTRAP_SCRIPTS" | grep -q "^${s}$"; then
-        check "  $s: in vcc-update but NOT in bootstrap" 1
-    fi
-done
+# --- Bootstrap and vcc-update use manifest ---
+echo "Bootstrap and vcc-update use manifest:"
+BS_MANIFEST=$(grep -c "manifest.txt" bootstrap.sh)
+VU_MANIFEST=$(grep -c "manifest.txt" config/cron/vcc-update)
+if [ "$BS_MANIFEST" -gt 0 ] && [ "$VU_MANIFEST" -gt 0 ]; then
+    check "Both reference manifest.txt" 0
+else
+    if [ "$BS_MANIFEST" -eq 0 ]; then check "bootstrap.sh: missing manifest reference" 1; fi
+    if [ "$VU_MANIFEST" -eq 0 ]; then check "vcc-update: missing manifest reference" 1; fi
+fi
 
 echo ""
 
 # --- Bootstrap step counter ---
 echo "Step counter consistency:"
-STEP_COUNTS=$(grep -oP '\[\d+/\d+\]' bootstrap.sh 2>/dev/null || grep -oE '\[[0-9]+/[0-9]+\]' bootstrap.sh)
-TOTAL=$(echo "$STEP_COUNTS" | head -1 | sed 's/.*\///' | tr -d ']')
-MISMATCHES=$(echo "$STEP_COUNTS" | grep -v "/$TOTAL]" || true)
-if [ -z "$MISMATCHES" ]; then
-    check "All steps use /$TOTAL] consistently" 0
+# bootstrap.sh now uses step() function with TOTAL variable
+TOTAL_VAR=$(grep -oE 'TOTAL=[0-9]+' bootstrap.sh | head -1 | sed 's/TOTAL=//')
+STEP_CALLS=$(grep -c '^step ' bootstrap.sh 2>/dev/null || grep -c 'step "' bootstrap.sh)
+if [ "$STEP_CALLS" = "$TOTAL_VAR" ]; then
+    check "step() calls ($STEP_CALLS) match TOTAL=$TOTAL_VAR" 0
 else
-    check "Inconsistent step totals: $MISMATCHES" 1
+    check "step() calls ($STEP_CALLS) != TOTAL ($TOTAL_VAR)" 1
 fi
 
 echo ""
 
-# --- Config files that bootstrap copies are also in vcc-update ---
-echo "Config file sync consistency:"
-
-# Claude config files
-for f in settings.json mcp_config.json CLAUDE.md keybindings.json; do
-    BS=$(grep -c "$f" bootstrap.sh)
-    VU=$(grep -c "$f" config/cron/vcc-update)
-    if [ "$BS" -gt 0 ] && [ "$VU" -gt 0 ]; then
-        check "$f: in both" 0
-    elif [ "$BS" -gt 0 ] && [ "$VU" -eq 0 ]; then
-        check "$f: in bootstrap but NOT in vcc-update" 1
-    fi
-done
-
-# Shell configs
-for f in zshrc.local zprofile.local logrotate.conf; do
-    BS=$(grep -c "$f" bootstrap.sh)
-    VU=$(grep -c "$f" config/cron/vcc-update)
-    if [ "$BS" -gt 0 ] && [ "$VU" -gt 0 ]; then
-        check "$f: in both" 0
-    elif [ "$BS" -gt 0 ] && [ "$VU" -eq 0 ]; then
-        check "$f: in bootstrap but NOT in vcc-update" 1
+# --- All manifest files are referenced in manifest.txt ---
+echo "Manifest covers all config files:"
+# Verify key config files are listed in the manifest
+for f in settings.json mcp_config.json CLAUDE.md keybindings.json zshrc.local zprofile.local logrotate.conf; do
+    if grep -q "$f" config/manifest.txt; then
+        check "$f: in manifest" 0
+    else
+        check "$f: MISSING from manifest" 1
     fi
 done
 
