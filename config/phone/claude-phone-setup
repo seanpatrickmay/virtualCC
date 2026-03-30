@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG_DIR="$HOME/.config/claude-phone"
+LOG_DIR="$HOME/.local/log/claude-phone"
+STATE_DIR="$HOME/.local/state/claude-phone"
+BIN_DIR="$HOME/.local/bin"
+SYSTEMD_DIR="$HOME/.config/systemd/user"
+SERVICE_NAME="claude-phone-server"
+NOTIFY_SCRIPT="$BIN_DIR/claude-phone-notify"
+
+# Create directories
+mkdir -p "$CONFIG_DIR" "$LOG_DIR" "$STATE_DIR" "$SYSTEMD_DIR"
+
+# Reuse existing config if present (idempotent)
+if [[ -f "$CONFIG_DIR/config" ]]; then
+    echo "Existing config found at $CONFIG_DIR/config — reusing tokens."
+    # shellcheck source=/dev/null
+    source "$CONFIG_DIR/config"
+    # Refresh IP in case it changed
+    NEW_IP=$(curl -4 -sf ifconfig.me || echo "unknown")
+    if [[ "$NEW_IP" != "${VCC_IP:-}" && "$NEW_IP" != "unknown" ]]; then
+        VCC_IP="$NEW_IP"
+        sed -i "s/^VCC_IP=.*/VCC_IP=$VCC_IP/" "$CONFIG_DIR/config"
+        echo "Updated VCC_IP to $VCC_IP"
+    fi
+else
+    # Generate secrets only on first run
+    AUTH_TOKEN=$(openssl rand -hex 16)
+    NTFY_TOPIC="vcc-$(openssl rand -hex 16)"
+    HTTP_PORT=8473
+    VCC_IP=$(curl -4 -sf ifconfig.me || echo "unknown")
+
+    # Write config
+    cat > "$CONFIG_DIR/config" <<EOF
+AUTH_TOKEN=$AUTH_TOKEN
+NTFY_TOPIC=$NTFY_TOPIC
+HTTP_PORT=$HTTP_PORT
+VCC_IP=$VCC_IP
+EOF
+fi
+
+chmod 600 "$CONFIG_DIR/config"
+
+echo "Config written to $CONFIG_DIR/config"
+
+# Create systemd user service
+cat > "$SYSTEMD_DIR/$SERVICE_NAME.service" <<EOF
+[Unit]
+Description=Claude Phone Status Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$BIN_DIR/claude-phone-server
+Restart=always
+RestartSec=5
+Environment=HOME=$HOME
+Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
+EOF
+
+echo "Systemd service written to $SYSTEMD_DIR/$SERVICE_NAME.service"
+
+# Reload and enable systemd service
+if systemctl --user daemon-reload 2>/dev/null; then
+    if systemctl --user enable --now "$SERVICE_NAME" 2>/dev/null; then
+        echo "Systemd service enabled and started."
+    else
+        echo "Warning: Could not enable systemd service (may need user session)."
+    fi
+else
+    echo "Warning: systemctl daemon-reload failed (systemd user session may not be available)."
+fi
+
+# Enable lingering so user services run without active login
+if loginctl enable-linger "$(whoami)" 2>/dev/null; then
+    echo "Lingering enabled for $(whoami)."
+else
+    if sudo loginctl enable-linger "$(whoami)" 2>/dev/null; then
+        echo "Lingering enabled for $(whoami) (via sudo)."
+    else
+        echo "Warning: Could not enable lingering. Services may stop on logout."
+    fi
+fi
+
+# Install cron job
+CRON_CMD="*/2 * * * * $NOTIFY_SCRIPT >> $LOG_DIR/notify.log 2>&1"
+if crontab -l 2>/dev/null | grep -qF "claude-phone-notify"; then
+    echo "Cron job already installed."
+else
+    (crontab -l 2>/dev/null || true; echo "$CRON_CMD") | crontab -
+    echo "Cron job installed."
+fi
+
+# Print summary
+cat <<EOF
+
+Setup complete!
+
+Dashboard URL: http://$VCC_IP:$HTTP_PORT/$AUTH_TOKEN/
+ntfy topic:    $NTFY_TOPIC
+
+On your phone:
+1. Install ntfy app (ntfy.sh)
+2. Subscribe to topic: $NTFY_TOPIC
+3. Bookmark: http://$VCC_IP:$HTTP_PORT/$AUTH_TOKEN/
+EOF

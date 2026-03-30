@@ -19,6 +19,18 @@ config/cron/backup	~/.local/bin/backup	+x
 config/health-check.sh	~/.local/bin/health-check	+x
 config/tmux-session.sh	~/.local/bin/tmux-session.sh	+x
 #
+# Offline / autonomous execution
+config/offline/claude-offline	~/.local/bin/claude-offline	+x
+config/offline/claude-offline-status	~/.local/bin/claude-offline-status	+x
+config/offline/handoff	~/.local/bin/handoff	+x
+config/offline/config.env	~/.config/claude-offline/config.env	bootstrap-only
+#
+# Phone monitoring
+config/phone/claude-phone-server	~/.local/bin/claude-phone-server	+x
+config/phone/claude-phone-notify	~/.local/bin/claude-phone-notify	+x
+config/phone/claude-phone-setup	~/.local/bin/claude-phone-setup	+x
+config/phone/claude-phone-server.service	~/.config/systemd/user/claude-phone-server.service	644
+#
 # Shell configs (not executable)
 config/zshrc.local	~/.zshrc.local	644
 config/zprofile.local	~/.zprofile.local	644

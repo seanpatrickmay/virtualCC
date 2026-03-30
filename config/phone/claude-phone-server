@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""Lightweight status dashboard for Claude Code offline sessions."""
+
+import html
+import http.server
+import json
+import logging
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+CONFIG_PATH = Path.home() / ".config" / "claude-phone" / "config"
+LOG_PATH = Path.home() / ".local" / "log" / "claude-phone" / "server.log"
+
+
+def load_config():
+    config = {}
+    with open(CONFIG_PATH) as f:
+        for line in f:
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                key, value = line.split("=", 1)
+                config[key.strip()] = value.strip()
+    return config
+
+
+def get_sessions():
+    try:
+        result = subprocess.run(
+            ["claude-offline-status", "--json"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return []
+        data = json.loads(result.stdout)
+        # Handle both {"sessions": [...]} and bare [...] formats
+        if isinstance(data, dict):
+            return data.get("sessions", [])
+        if isinstance(data, list):
+            return data
+        return []
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+        return []
+
+
+STATUS_COLORS = {
+    "running": "#4caf50",
+    "completed": "#2196f3",
+    "error": "#f44336",
+    "idle": "#ff9800",
+    "stalled": "#9c27b0",
+}
+
+
+def render_session(s):
+    if not isinstance(s, dict):
+        return ""
+    name = s.get("name", "unnamed")
+    status = s.get("status", "unknown").lower()
+    age = s.get("age_human", s.get("age", "?"))
+    workdir = s.get("working_dir", "?")
+    log_tail = s.get("log_tail", "")
+    color = STATUS_COLORS.get(status, "#888")
+    # log_tail may be a string (from claude-offline-status) or a list
+    if isinstance(log_tail, list):
+        log_text = "\n".join(log_tail[-5:]) if log_tail else "(no log output)"
+    else:
+        log_text = str(log_tail).strip() if log_tail else "(no log output)"
+    # Escape HTML in dynamic content
+    name = html.escape(str(name))
+    status = html.escape(str(status))
+    age = html.escape(str(age))
+    workdir = html.escape(str(workdir))
+    log_text = html.escape(log_text)
+    return f"""
+    <div style="background:#2d2d44;border-radius:8px;padding:16px;margin-bottom:16px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+        <span style="background:{color};color:#fff;padding:2px 10px;border-radius:12px;
+              font-size:0.85em;font-weight:bold;">{status}</span>
+        <strong style="font-size:1.1em;">{name}</strong>
+        <span style="color:#aaa;font-size:0.85em;">({age})</span>
+      </div>
+      <div style="color:#aaa;font-size:0.85em;margin-bottom:8px;">{workdir}</div>
+      <pre style="background:#1a1a2e;padding:10px;border-radius:4px;overflow-x:auto;
+           font-size:0.82em;margin:0;white-space:pre-wrap;color:#ccc;">{log_text}</pre>
+    </div>"""
+
+
+def render_dashboard(sessions):
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    if sessions:
+        body = "\n".join(render_session(s) for s in sessions)
+    else:
+        body = '<p style="color:#aaa;text-align:center;padding:40px;">No active sessions</p>'
+    return f"""<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="30">
+<title>VCC Status</title>
+</head>
+<body style="background:#1a1a2e;color:#e0e0e0;font-family:system-ui,sans-serif;
+     margin:0;padding:16px;max-width:800px;margin:0 auto;">
+<h1 style="margin-bottom:20px;">VCC Status</h1>
+{body}
+<footer style="color:#666;font-size:0.8em;text-align:center;margin-top:24px;
+        border-top:1px solid #333;padding-top:12px;">
+Last updated: {now}
+</footer>
+</body></html>"""
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    token = ""
+
+    def log_message(self, format, *args):
+        logging.info("%s - %s", self.address_string(), format % args)
+
+    def do_GET(self):
+        path = self.path.rstrip("/")
+        token_prefix = f"/{self.token}"
+
+        if path == token_prefix:
+            sessions = get_sessions()
+            html_content = render_dashboard(sessions)
+            self._respond(200, "text/html", html_content.encode())
+        elif path == f"{token_prefix}/json":
+            sessions = get_sessions()
+            self._respond(200, "application/json", json.dumps(sessions, indent=2).encode())
+        else:
+            self._respond(404, "text/plain", b"Not found")
+
+    def _respond(self, code, content_type, body):
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def main():
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        filename=str(LOG_PATH),
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+
+    config = load_config()
+    token = config["AUTH_TOKEN"]
+    port = int(config.get("HTTP_PORT", "8473"))
+
+    Handler.token = token
+    server = http.server.HTTPServer(("0.0.0.0", port), Handler)
+    logging.info("Starting server on port %d", port)
+    print(f"Listening on 0.0.0.0:{port}", file=sys.stderr)
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        logging.info("Server shutting down")
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()

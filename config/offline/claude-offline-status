@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+#
+# claude-offline-status — Rich status view of offline Claude Code sessions.
+# Shows tmux sessions matching offline-*, their age, working directory,
+# recent log output, and process status.
+#
+# Usage:
+#   claude-offline-status            # one-shot status
+#   claude-offline-status --watch    # auto-refresh every 30s
+#   claude-offline-status --json     # machine-readable JSON output
+
+set -euo pipefail
+
+LOG_DIR="$HOME/.local/log/claude-offline"
+WATCH_INTERVAL=30
+
+# --- Colors ---
+C_RESET='\033[0m'
+C_BOLD='\033[1m'
+C_DIM='\033[90m'
+C_GREEN='\033[32m'
+C_YELLOW='\033[33m'
+C_RED='\033[31m'
+C_CYAN='\033[36m'
+
+# Disable colors when not a tty or in JSON mode
+use_color=true
+[[ ! -t 1 ]] && use_color=false
+
+color() {
+    if $use_color; then
+        echo -ne "$1"
+    fi
+}
+
+# --- Helpers ---
+
+human_duration() {
+    local seconds="$1"
+    if (( seconds < 60 )); then
+        echo "${seconds}s"
+    elif (( seconds < 3600 )); then
+        echo "$(( seconds / 60 ))m $(( seconds % 60 ))s"
+    elif (( seconds < 86400 )); then
+        echo "$(( seconds / 3600 ))h $(( (seconds % 3600) / 60 ))m"
+    else
+        echo "$(( seconds / 86400 ))d $(( (seconds % 86400) / 3600 ))h"
+    fi
+}
+
+get_session_info() {
+    local session_name="$1"
+    local now
+    now=$(date +%s)
+
+    # Session creation time
+    local created_epoch
+    created_epoch=$(tmux display-message -p -t "$session_name" '#{session_created}' 2>/dev/null || echo "0")
+    local age_seconds=$(( now - created_epoch ))
+    local age_human
+    age_human=$(human_duration "$age_seconds")
+
+    # Working directory from the active pane
+    local cwd
+    cwd=$(tmux display-message -p -t "$session_name" '#{pane_current_path}' 2>/dev/null || echo "unknown")
+
+    # Current command in the pane
+    local pane_cmd
+    pane_cmd=$(tmux display-message -p -t "$session_name" '#{pane_current_command}' 2>/dev/null || echo "unknown")
+
+    # Determine status: check if a claude process is running in the session
+    local status="completed"
+    local status_detail=""
+    local session_pid
+    session_pid=$(tmux list-panes -t "$session_name" -F '#{pane_pid}' 2>/dev/null | head -1)
+
+    if [[ -n "$session_pid" ]]; then
+        # Check if claude (node) is among the descendant processes
+        local descendants
+        descendants=$(pstree -p "$session_pid" 2>/dev/null || ps --ppid "$session_pid" -o comm= 2>/dev/null || echo "")
+        if echo "$descendants" | grep -qi 'claude\|node'; then
+            status="running"
+        elif echo "$descendants" | grep -qi 'zsh\|bash\|sh'; then
+            # Shell is alive but claude finished
+            status="idle"
+        fi
+    fi
+
+    # Find matching log file
+    local log_file=""
+    local log_tail=""
+    local log_candidates=()
+
+    # Try exact name match first, then glob
+    if [[ -f "$LOG_DIR/${session_name}.log" ]]; then
+        log_file="$LOG_DIR/${session_name}.log"
+    else
+        # Try pattern matching
+        for f in "$LOG_DIR"/${session_name}*.log "$LOG_DIR"/*${session_name#offline-}*.log; do
+            [[ -f "$f" ]] && log_candidates+=("$f")
+        done
+        if (( ${#log_candidates[@]} > 0 )); then
+            log_file="${log_candidates[0]}"
+        fi
+    fi
+
+    if [[ -n "$log_file" && -f "$log_file" ]]; then
+        log_tail=$(tail -5 "$log_file" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' || echo "")
+        # Check log for error indicators
+        local last_lines
+        last_lines=$(tail -20 "$log_file" 2>/dev/null || echo "")
+        if echo "$last_lines" | grep -qi 'error\|fatal\|panic\|exception\|failed'; then
+            if [[ "$status" != "running" ]]; then
+                status="error"
+            fi
+        fi
+    fi
+
+    # Export results via global vars (bash doesn't have great return-multiple)
+    _INFO_AGE_HUMAN="$age_human"
+    _INFO_AGE_SECONDS="$age_seconds"
+    _INFO_CWD="$cwd"
+    _INFO_PANE_CMD="$pane_cmd"
+    _INFO_STATUS="$status"
+    _INFO_LOG_FILE="$log_file"
+    _INFO_LOG_TAIL="$log_tail"
+    _INFO_CREATED="$created_epoch"
+}
+
+print_status_badge() {
+    local status="$1"
+    case "$status" in
+        running)  color "$C_GREEN";  printf "● RUNNING";  color "$C_RESET" ;;
+        idle)     color "$C_YELLOW"; printf "○ IDLE";     color "$C_RESET" ;;
+        error)    color "$C_RED";    printf "✖ ERROR";    color "$C_RESET" ;;
+        completed) color "$C_DIM";   printf "◉ COMPLETED"; color "$C_RESET" ;;
+        *)        printf "? %s" "$status" ;;
+    esac
+}
+
+render_text() {
+    local sessions
+    sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^offline-' | sort || true)
+
+    if [[ -z "$sessions" ]]; then
+        color "$C_DIM"
+        echo "No offline sessions found (matching offline-*)."
+        color "$C_RESET"
+        return
+    fi
+
+    local count
+    count=$(echo "$sessions" | wc -l | tr -d ' ')
+    color "$C_BOLD"
+    printf "Offline Claude Sessions (%d)\n" "$count"
+    color "$C_RESET"
+    printf '%0.s─' {1..50}; echo
+
+    while IFS= read -r session; do
+        [[ -z "$session" ]] && continue
+        get_session_info "$session"
+
+        echo
+        # Session header
+        color "$C_BOLD"
+        printf "  %s" "$session"
+        color "$C_RESET"
+        printf "  "
+        print_status_badge "$_INFO_STATUS"
+        printf "\n"
+
+        # Details
+        color "$C_DIM"
+        printf "  Age: %s | Dir: %s\n" "$_INFO_AGE_HUMAN" "$_INFO_CWD"
+        printf "  Process: %s\n" "$_INFO_PANE_CMD"
+        color "$C_RESET"
+
+        # Log tail
+        if [[ -n "$_INFO_LOG_TAIL" ]]; then
+            color "$C_DIM"
+            printf "  Log (%s):\n" "$(basename "$_INFO_LOG_FILE")"
+            color "$C_RESET"
+            while IFS= read -r line; do
+                printf "    %s\n" "$line"
+            done <<< "$_INFO_LOG_TAIL"
+        else
+            color "$C_DIM"
+            printf "  (no log file found)\n"
+            color "$C_RESET"
+        fi
+
+        printf '%0.s─' {1..50}; echo
+    done <<< "$sessions"
+}
+
+render_json() {
+    local sessions
+    sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^offline-' | sort || true)
+
+    printf '{"sessions":['
+    local first=true
+    while IFS= read -r session; do
+        [[ -z "$session" ]] && continue
+        get_session_info "$session"
+
+        $first || printf ','
+        first=false
+
+        # Escape strings for JSON
+        local cwd_json log_json pane_json logfile_json
+        cwd_json=$(printf '%s' "$_INFO_CWD" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()),end="")' 2>/dev/null || printf '"%s"' "$_INFO_CWD")
+        log_json=$(printf '%s' "$_INFO_LOG_TAIL" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()),end="")' 2>/dev/null || printf '""')
+        pane_json=$(printf '%s' "$_INFO_PANE_CMD" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()),end="")' 2>/dev/null || printf '"%s"' "$_INFO_PANE_CMD")
+        logfile_json=$(printf '%s' "$_INFO_LOG_FILE" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()),end="")' 2>/dev/null || printf '"%s"' "$_INFO_LOG_FILE")
+
+        printf '{"name":"%s","status":"%s","age_seconds":%d,"age_human":"%s","created_epoch":%s,"working_dir":%s,"process":%s,"log_file":%s,"log_tail":%s}' \
+            "$session" \
+            "$_INFO_STATUS" \
+            "$_INFO_AGE_SECONDS" \
+            "$_INFO_AGE_HUMAN" \
+            "$_INFO_CREATED" \
+            "$cwd_json" \
+            "$pane_json" \
+            "$logfile_json" \
+            "$log_json"
+    done <<< "$sessions"
+    printf ']}\n'
+}
+
+# --- Main ---
+
+mode="text"
+for arg in "$@"; do
+    case "$arg" in
+        --watch) mode="watch" ;;
+        --json)  mode="json"; use_color=false ;;
+        --help|-h)
+            echo "Usage: claude-offline-status [--watch] [--json]"
+            echo
+            echo "Shows status of offline Claude Code tmux sessions (offline-*)."
+            echo
+            echo "Options:"
+            echo "  --watch   Auto-refresh every ${WATCH_INTERVAL}s"
+            echo "  --json    Machine-readable JSON output"
+            echo "  --help    Show this help"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg" >&2
+            echo "Run with --help for usage." >&2
+            exit 1
+            ;;
+    esac
+done
+
+case "$mode" in
+    text)
+        render_text
+        ;;
+    json)
+        render_json
+        ;;
+    watch)
+        while true; do
+            clear
+            color "$C_DIM"
+            printf "[%s] Refreshing every %ds — Ctrl+C to stop\n\n" "$(date '+%H:%M:%S')" "$WATCH_INTERVAL"
+            color "$C_RESET"
+            render_text
+            sleep "$WATCH_INTERVAL"
+        done
+        ;;
+esac

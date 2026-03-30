@@ -1,0 +1,14 @@
+[Unit]
+Description=Claude Phone Status Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/dev/.local/bin/claude-phone-server
+Restart=always
+RestartSec=5
+Environment=HOME=/home/dev
+Environment=PATH=/home/dev/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

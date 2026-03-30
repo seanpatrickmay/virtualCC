@@ -1,0 +1,713 @@
+#!/usr/bin/env bash
+# claude-offline — Run Claude Code autonomously in a detached tmux session
+# with retry logic, budget tracking, structured logging, and notifications.
+
+set -euo pipefail
+
+CONFIG_FILE="$HOME/.config/claude-offline/config.env"
+LOG_DIR="$HOME/.local/log/claude-offline"
+
+# ── Load config ─────────────────────────────────────────────────────────────
+
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        # shellcheck disable=SC1090
+        source "$CONFIG_FILE"
+    fi
+    # Apply LOG_DIR from config if set
+    LOG_DIR="${CO_LOG_DIR:-$LOG_DIR}"
+    # Expand ~ in LOG_DIR (safe alternative to eval)
+    LOG_DIR="${LOG_DIR/#\~/$HOME}"
+}
+
+load_config
+mkdir -p "$LOG_DIR"
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+die() { echo "error: $*" >&2; exit 1; }
+
+usage() {
+    cat <<'EOF'
+claude-offline — Run Claude Code in a detached tmux session with retries,
+budget tracking, and structured logging.
+
+USAGE
+  claude-offline [OPTIONS] "your task description"
+
+SUBCOMMANDS
+  --status              Show all running offline sessions
+  --logs [name]         Tail the latest (or named) session log
+  --stop [name]         Gracefully stop a session
+  --result [name]       Show structured result from JSONL log
+  --history             Show recent task history
+  -h, --help            Show this help
+
+OPTIONS
+  --project <dir>       Working directory (default: current directory)
+  --resume <session-id> Resume an existing Claude Code session
+  --model <model>       Model to use (passed to claude --model)
+  --name <name>         Human-readable task name
+  --budget <usd>        Max budget in USD (default: 5.00)
+  --timeout <seconds>   Max runtime in seconds (default: 7200)
+  --retries <n>         Max retry attempts (default: 3)
+  --notify <url>        Notification URL (ntfy endpoint)
+  --fallback <model>    Fallback model (default: sonnet)
+  --permission-mode <m> Permission mode (default: bypassPermissions)
+
+EXAMPLES
+  claude-offline "implement the new auth flow"
+  claude-offline --project ~/myapp --budget 2.00 "fix the broken tests"
+  claude-offline --resume abc123 "continue from here"
+  claude-offline --name "auth-fix" --notify https://ntfy.sh/mytopic "fix auth"
+  claude-offline --status
+  claude-offline --history
+  claude-offline --result offline-20260329-143000
+EOF
+    exit 0
+}
+
+# ── Subcommand: --status ────────────────────────────────────────────────────
+
+show_status() {
+    local sessions
+    sessions=$(tmux list-sessions -F '#{session_name} #{session_created} #{session_activity}' 2>/dev/null | grep '^offline-' || true)
+    if [[ -z "$sessions" ]]; then
+        echo "No running offline sessions."
+        echo ""
+        # Still show recent history if available
+        local jsonl_count
+        jsonl_count=$(find "$LOG_DIR" -name '*.jsonl' -type f 2>/dev/null | wc -l)
+        if [[ "$jsonl_count" -gt 0 ]]; then
+            echo "Run --history to see completed sessions."
+        fi
+        return
+    fi
+    echo "RUNNING OFFLINE SESSIONS"
+    echo "────────────────────────────────────────────────────────────────────────"
+    printf "%-28s %-20s %-20s %s\n" "SESSION" "CREATED" "LAST ACTIVITY" "TASK"
+    echo "────────────────────────────────────────────────────────────────────────"
+    while IFS=' ' read -r name created activity; do
+        local created_fmt activity_fmt task_name
+        created_fmt=$(date -d "@$created" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$created")
+        activity_fmt=$(date -d "@$activity" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$activity")
+        # Try to extract task from JSONL
+        task_name=""
+        if [[ -f "$LOG_DIR/${name}.jsonl" ]]; then
+            task_name=$(jq -r 'select(.event=="start") | .task // empty' "$LOG_DIR/${name}.jsonl" 2>/dev/null | head -1 || true)
+        fi
+        if [[ -n "$task_name" ]] && [[ ${#task_name} -gt 30 ]]; then
+            task_name="${task_name:0:27}..."
+        fi
+        printf "%-28s %-20s %-20s %s\n" "$name" "$created_fmt" "$activity_fmt" "$task_name"
+    done <<< "$sessions"
+    echo ""
+    echo "Attach:  tmux attach -t <session>"
+    echo "Logs:    claude-offline --logs <session>"
+    echo "Stop:    claude-offline --stop <session>"
+}
+
+# ── Subcommand: --logs ──────────────────────────────────────────────────────
+
+show_logs() {
+    local target="$1"
+    if [[ -n "$target" ]]; then
+        local logfile="$LOG_DIR/${target}.log"
+        if [[ ! -f "$logfile" ]]; then
+            logfile=$(ls -t "$LOG_DIR"/"${target}"*.log 2>/dev/null | head -1 || true)
+        fi
+        [[ -z "$logfile" || ! -f "$logfile" ]] && die "No log found for session: $target"
+        echo "── $logfile ──"
+        tail -f "$logfile"
+    else
+        local latest
+        latest=$(ls -t "$LOG_DIR"/*.log 2>/dev/null | head -1 || true)
+        [[ -z "$latest" ]] && die "No logs found in $LOG_DIR"
+        echo "── $latest ──"
+        tail -f "$latest"
+    fi
+}
+
+# ── Subcommand: --stop ──────────────────────────────────────────────────────
+
+stop_session() {
+    local target="$1"
+    if [[ -z "$target" ]]; then
+        target=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^offline-' | tail -1 || true)
+        [[ -z "$target" ]] && die "No running offline sessions found."
+        echo "Stopping most recent session: $target"
+    fi
+    # Use exact match (= prefix) to prevent tmux prefix matching
+    if ! tmux has-session -t "=$target" 2>/dev/null; then
+        die "Session '$target' does not exist."
+    fi
+    tmux send-keys -t "=$target" C-c 2>/dev/null || true
+    sleep 2
+    tmux send-keys -t "=$target" "/exit" Enter 2>/dev/null || true
+    sleep 1
+    if tmux has-session -t "=$target" 2>/dev/null; then
+        tmux kill-session -t "=$target"
+    fi
+    echo "Session '$target' stopped."
+}
+
+# ── Subcommand: --result ────────────────────────────────────────────────────
+
+show_result() {
+    local target="$1"
+    local jsonl=""
+    if [[ -n "$target" ]]; then
+        jsonl="$LOG_DIR/${target}.jsonl"
+        if [[ ! -f "$jsonl" ]]; then
+            jsonl=$(ls -t "$LOG_DIR"/"${target}"*.jsonl 2>/dev/null | head -1 || true)
+        fi
+    else
+        jsonl=$(ls -t "$LOG_DIR"/*.jsonl 2>/dev/null | head -1 || true)
+    fi
+    [[ -z "$jsonl" || ! -f "$jsonl" ]] && die "No JSONL log found for: ${target:-latest}"
+
+    echo "── Result: $(basename "$jsonl" .jsonl) ──"
+    echo ""
+
+    # Show the summary line
+    local summary
+    summary=$(jq -c 'select(.event=="summary")' "$jsonl" 2>/dev/null | tail -1 || true)
+    if [[ -z "$summary" ]]; then
+        echo "No summary found (session may still be running)."
+        return
+    fi
+
+    echo "$summary" | jq -r '
+        "Status:     \(.status // "unknown")",
+        "Attempts:   \(.attempts // "?")",
+        "Total Cost: $\(.total_cost_usd // "?")",
+        "Duration:   \(.total_duration_s // "?")s",
+        "Task:       \(.task // "?")",
+        "",
+        "── Last Result ──",
+        (.result_text // "(no result text)")
+    '
+}
+
+# ── Subcommand: --history ──────────────────────────────────────────────────
+
+show_history() {
+    local jsonl_files
+    jsonl_files=$(ls -t "$LOG_DIR"/*.jsonl 2>/dev/null || true)
+    if [[ -z "$jsonl_files" ]]; then
+        echo "No task history found."
+        return
+    fi
+
+    echo "TASK HISTORY"
+    echo "──────────────────────────────────────────────────────────────────────────────────"
+    printf "%-28s %-10s %-8s %-8s %s\n" "SESSION" "STATUS" "COST" "TRIES" "TASK"
+    echo "──────────────────────────────────────────────────────────────────────────────────"
+
+    while IFS= read -r f; do
+        local session_name status cost attempts task
+        session_name=$(basename "$f" .jsonl)
+        # Get summary line
+        local summary
+        summary=$(jq -c 'select(.event=="summary")' "$f" 2>/dev/null | tail -1 || true)
+        if [[ -n "$summary" ]]; then
+            status=$(echo "$summary" | jq -r '.status // "unknown"')
+            cost=$(echo "$summary" | jq -r '"$" + (.total_cost_usd // "?" | tostring)')
+            attempts=$(echo "$summary" | jq -r '.attempts // "?"')
+            task=$(echo "$summary" | jq -r '.task // "?"')
+        else
+            # Still running or no summary yet — check start event
+            status="running"
+            cost="-"
+            attempts="-"
+            task=$(jq -r 'select(.event=="start") | .task // "?"' "$f" 2>/dev/null | head -1 || echo "?")
+        fi
+        if [[ -n "$task" ]] && [[ ${#task} -gt 35 ]]; then
+            task="${task:0:32}..."
+        fi
+        printf "%-28s %-10s %-8s %-8s %s\n" "$session_name" "$status" "$cost" "$attempts" "$task"
+    done <<< "$jsonl_files"
+}
+
+# ── Parse arguments ─────────────────────────────────────────────────────────
+
+PROJECT_DIR=""
+RESUME_ID=""
+MODEL="${CO_MODEL:-}"
+PROMPT=""
+TASK_NAME=""
+MAX_BUDGET="${CO_MAX_BUDGET_USD:-5.00}"
+MAX_RUNTIME="${CO_MAX_RUNTIME:-7200}"
+MAX_RETRIES="${CO_MAX_RETRIES:-3}"
+NOTIFY_URL="${CO_NOTIFY_URL:-}"
+FALLBACK_MODEL="${CO_FALLBACK_MODEL:-sonnet}"
+PERMISSION_MODE="${CO_PERMISSION_MODE:-bypassPermissions}"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            usage
+            ;;
+        --status)
+            show_status
+            exit 0
+            ;;
+        --logs)
+            show_logs "${2:-}"
+            exit 0
+            ;;
+        --stop)
+            stop_session "${2:-}"
+            exit 0
+            ;;
+        --result)
+            show_result "${2:-}"
+            exit 0
+            ;;
+        --history)
+            show_history
+            exit 0
+            ;;
+        --project)
+            [[ -z "${2:-}" ]] && die "--project requires a directory argument"
+            PROJECT_DIR="$2"
+            shift 2
+            ;;
+        --resume)
+            [[ -z "${2:-}" ]] && die "--resume requires a session-id argument"
+            RESUME_ID="$2"
+            shift 2
+            ;;
+        --model)
+            [[ -z "${2:-}" ]] && die "--model requires a model name"
+            MODEL="$2"
+            shift 2
+            ;;
+        --name)
+            [[ -z "${2:-}" ]] && die "--name requires a name"
+            TASK_NAME="$2"
+            shift 2
+            ;;
+        --budget)
+            [[ -z "${2:-}" ]] && die "--budget requires a USD amount"
+            MAX_BUDGET="$2"
+            shift 2
+            ;;
+        --timeout)
+            [[ -z "${2:-}" ]] && die "--timeout requires seconds"
+            MAX_RUNTIME="$2"
+            shift 2
+            ;;
+        --retries)
+            [[ -z "${2:-}" ]] && die "--retries requires a number"
+            MAX_RETRIES="$2"
+            shift 2
+            ;;
+        --notify)
+            [[ -z "${2:-}" ]] && die "--notify requires a URL"
+            NOTIFY_URL="$2"
+            shift 2
+            ;;
+        --fallback)
+            [[ -z "${2:-}" ]] && die "--fallback requires a model name"
+            FALLBACK_MODEL="$2"
+            shift 2
+            ;;
+        --permission-mode)
+            [[ -z "${2:-}" ]] && die "--permission-mode requires a mode"
+            PERMISSION_MODE="$2"
+            shift 2
+            ;;
+        -*)
+            die "Unknown option: $1 (see --help)"
+            ;;
+        *)
+            if [[ -z "$PROMPT" ]]; then
+                PROMPT="$1"
+            else
+                PROMPT="$PROMPT $1"
+            fi
+            shift
+            ;;
+    esac
+done
+
+[[ -z "$PROMPT" ]] && die "No task description provided. Usage: claude-offline \"your task\""
+
+# ── Input validation ───────────────────────────────────────────────────────
+
+[[ "$MAX_BUDGET" =~ ^[0-9]+\.?[0-9]*$ ]] || die "Invalid budget: $MAX_BUDGET (must be a number)"
+[[ "$MAX_RUNTIME" =~ ^[0-9]+$ ]] || die "Invalid timeout: $MAX_RUNTIME (must be an integer)"
+[[ "$MAX_RETRIES" =~ ^[0-9]+$ ]] || die "Invalid retries: $MAX_RETRIES (must be an integer)"
+command -v tmux >/dev/null 2>&1 || die "tmux is required but not found in PATH"
+command -v jq >/dev/null 2>&1 || die "jq is required but not found in PATH"
+command -v claude >/dev/null 2>&1 || die "claude is required but not found in PATH"
+
+# ── Resolve working directory ───────────────────────────────────────────────
+
+if [[ -n "$PROJECT_DIR" ]]; then
+    PROJECT_DIR=$(cd "$PROJECT_DIR" 2>/dev/null && pwd) || die "Directory not found: $PROJECT_DIR"
+else
+    PROJECT_DIR="$(pwd)"
+fi
+
+# ── Build session name and log paths ────────────────────────────────────────
+
+TIMESTAMP=$(date '+%Y%m%d-%H%M%S')
+if [[ -n "$TASK_NAME" ]]; then
+    # Sanitize task name for use in filenames
+    SAFE_NAME=$(echo "$TASK_NAME" | tr -cs 'a-zA-Z0-9_-' '-' | sed 's/^-//;s/-$//' | head -c 40)
+    SESSION_NAME="offline-${TIMESTAMP}-${SAFE_NAME}"
+else
+    SESSION_NAME="offline-${TIMESTAMP}"
+fi
+LOGFILE="$LOG_DIR/${SESSION_NAME}.log"
+JSONL_FILE="$LOG_DIR/${SESSION_NAME}.jsonl"
+
+# ── Generate wrapper script ─────────────────────────────────────────────────
+
+WRAPPER=$(mktemp /tmp/claude-offline-XXXXXX.sh)
+# Clean up wrapper if we fail before launching tmux
+trap 'rm -f "$WRAPPER"' EXIT
+
+# Write variable assignments with proper quoting (unquoted heredoc expands vars)
+# Using printf %q to safely quote all values against shell injection
+_qv() { printf '%q' "$1"; }
+
+cat > "$WRAPPER" <<WRAPPER_VARS
+#!/usr/bin/env bash
+# Wrapper script for claude-offline tmux session.
+# Do NOT use set -e here; we handle errors manually.
+set -uo pipefail
+
+# ── Parameters passed via environment ──
+SESSION_NAME=$(_qv "$SESSION_NAME")
+PROJECT_DIR=$(_qv "$PROJECT_DIR")
+PROMPT=$(_qv "$PROMPT")
+LOGFILE=$(_qv "$LOGFILE")
+JSONL_FILE=$(_qv "$JSONL_FILE")
+MAX_BUDGET=$(_qv "$MAX_BUDGET")
+MAX_RUNTIME=$(_qv "$MAX_RUNTIME")
+MAX_RETRIES=$(_qv "$MAX_RETRIES")
+NOTIFY_URL=$(_qv "$NOTIFY_URL")
+NOTIFY_ON_SUCCESS=$(_qv "${CO_NOTIFY_ON_SUCCESS:-true}")
+NOTIFY_ON_FAILURE=$(_qv "${CO_NOTIFY_ON_FAILURE:-true}")
+FALLBACK_MODEL=$(_qv "$FALLBACK_MODEL")
+PERMISSION_MODE=$(_qv "$PERMISSION_MODE")
+MODEL=$(_qv "$MODEL")
+RESUME_ID=$(_qv "$RESUME_ID")
+TASK_NAME=$(_qv "$TASK_NAME")
+BACKOFF_INITIAL=$(_qv "${CO_BACKOFF_INITIAL:-30}")
+BACKOFF_MAX=$(_qv "${CO_BACKOFF_MAX:-300}")
+EXTRA_FLAGS=$(_qv "${CO_EXTRA_FLAGS:-}")
+WRAPPER_VARS
+
+# Append the rest of the wrapper as a literal (no expansion)
+cat >> "$WRAPPER" <<'WRAPPER_SCRIPT'
+
+# ── Helpers ──
+log() { echo "[$(date '+%H:%M:%S')] $*" | tee -a "$LOGFILE"; }
+log_jsonl() { echo "$1" >> "$JSONL_FILE"; }
+
+# ── Setup ──
+cd "$PROJECT_DIR" || { echo "error: cannot cd to $PROJECT_DIR"; exit 1; }
+
+# Banner
+log "═══════════════════════════════════════════════════════"
+log "  claude-offline session: $SESSION_NAME"
+log "═══════════════════════════════════════════════════════"
+log "  Task:       $PROMPT"
+[[ -n "$TASK_NAME" ]] && log "  Name:       $TASK_NAME"
+log "  Directory:  $PROJECT_DIR"
+log "  Budget:     \$${MAX_BUDGET}"
+log "  Timeout:    ${MAX_RUNTIME}s"
+log "  Retries:    $MAX_RETRIES"
+log "  Fallback:   $FALLBACK_MODEL"
+log "  Permission: $PERMISSION_MODE"
+[[ -n "$MODEL" ]] && log "  Model:      $MODEL"
+[[ -n "$RESUME_ID" ]] && log "  Resume:     $RESUME_ID"
+[[ -n "$NOTIFY_URL" ]] && log "  Notify:     $NOTIFY_URL"
+log "  Started:    $(date)"
+log "═══════════════════════════════════════════════════════"
+log ""
+
+# Log start event
+log_jsonl "$(jq -nc \
+    --arg event "start" \
+    --arg session "$SESSION_NAME" \
+    --arg task "$PROMPT" \
+    --arg name "$TASK_NAME" \
+    --arg dir "$PROJECT_DIR" \
+    --arg budget "$MAX_BUDGET" \
+    --arg ts "$(date -Iseconds)" \
+    '{event:$event, session:$session, task:$task, name:$name, dir:$dir, budget:$budget, timestamp:$ts}'
+)"
+
+# ── Retry loop ──
+remaining_budget="$MAX_BUDGET"
+total_cost=0
+attempt=0
+max_attempts=$(( MAX_RETRIES + 1 ))
+final_status="unknown"
+final_result=""
+backoff="$BACKOFF_INITIAL"
+current_resume="$RESUME_ID"
+start_time=$(date +%s)
+
+while [[ $attempt -lt $max_attempts ]]; do
+    attempt=$(( attempt + 1 ))
+    log "── Attempt $attempt / $max_attempts ──"
+
+    # Build command
+    cmd=(claude -p --output-format json)
+    cmd+=(--max-budget-usd "$remaining_budget")
+    cmd+=(--permission-mode "$PERMISSION_MODE")
+    cmd+=(--fallback-model "$FALLBACK_MODEL")
+
+    if [[ -n "$MODEL" ]]; then
+        cmd+=(--model "$MODEL")
+    fi
+
+    if [[ -n "$current_resume" ]]; then
+        cmd+=(--resume "$current_resume")
+        log "  Resuming session: $current_resume"
+    fi
+
+    # Add extra flags if set
+    if [[ -n "$EXTRA_FLAGS" ]]; then
+        # shellcheck disable=SC2086
+        cmd+=($EXTRA_FLAGS)
+    fi
+
+    log "  Budget remaining: \$${remaining_budget}"
+    log "  Running: ${cmd[*]} <prompt>"
+
+    # Run claude with timeout
+    result_file=$(mktemp /tmp/claude-result-XXXXXX.json)
+    attempt_start=$(date +%s)
+
+    set +e
+    timeout --signal=TERM --kill-after=30 "$MAX_RUNTIME" \
+        "${cmd[@]}" "$PROMPT" > "$result_file" 2>>"$LOGFILE"
+    exit_code=$?
+    set -e
+
+    attempt_end=$(date +%s)
+    attempt_duration=$(( attempt_end - attempt_start ))
+
+    log "  Exit code: $exit_code (duration: ${attempt_duration}s)"
+
+    # Parse result JSON
+    session_id=""
+    is_error="false"
+    stop_reason=""
+    cost_usd="0"
+    duration_ms="0"
+    num_turns="0"
+    result_text=""
+
+    if [[ -s "$result_file" ]] && jq empty "$result_file" 2>/dev/null; then
+        session_id=$(jq -r '.session_id // empty' "$result_file" 2>/dev/null || true)
+        is_error=$(jq -r '.is_error // false' "$result_file" 2>/dev/null || echo "false")
+        stop_reason=$(jq -r '.stop_reason // empty' "$result_file" 2>/dev/null || true)
+        cost_usd=$(jq -r '.total_cost_usd // 0' "$result_file" 2>/dev/null || echo "0")
+        duration_ms=$(jq -r '.duration_ms // 0' "$result_file" 2>/dev/null || echo "0")
+        num_turns=$(jq -r '.num_turns // 0' "$result_file" 2>/dev/null || echo "0")
+        result_text=$(jq -r '.result // empty' "$result_file" 2>/dev/null || true)
+    elif [[ -s "$result_file" ]]; then
+        log "  WARNING: claude returned malformed JSON, treating as error"
+        is_error="true"
+    fi
+
+    # Ensure numeric fields are valid numbers for jq --argjson
+    [[ "$num_turns" =~ ^[0-9]+$ ]] || num_turns=0
+    [[ "$cost_usd" =~ ^[0-9]*\.?[0-9]+$ ]] || cost_usd=0
+    [[ "$duration_ms" =~ ^[0-9]+$ ]] || duration_ms=0
+
+    # Update cumulative cost
+    if [[ -n "$cost_usd" ]] && [[ "$cost_usd" != "0" ]] && [[ "$cost_usd" != "null" ]]; then
+        total_cost=$(awk "BEGIN {printf \"%.4f\", $total_cost + $cost_usd}" 2>/dev/null || echo "$total_cost")
+        remaining_budget=$(awk "BEGIN {v = $MAX_BUDGET - $total_cost; printf \"%.4f\", (v > 0 ? v : 0)}" 2>/dev/null || echo "0")
+    fi
+
+    # Log human-readable summary for this attempt
+    log "  Session ID:  ${session_id:-none}"
+    log "  Is Error:    $is_error"
+    log "  Stop Reason: ${stop_reason:-none}"
+    log "  Cost:        \$${cost_usd}"
+    log "  Turns:       $num_turns"
+    log "  Duration:    ${duration_ms}ms"
+    log "  Cumulative:  \$${total_cost} / \$${MAX_BUDGET}"
+
+    # Log structured JSONL for this attempt
+    log_jsonl "$(jq -nc \
+        --arg event "attempt" \
+        --argjson attempt "$attempt" \
+        --arg session_id "$session_id" \
+        --arg is_error "$is_error" \
+        --arg stop_reason "$stop_reason" \
+        --arg cost "$cost_usd" \
+        --arg duration_ms "$duration_ms" \
+        --argjson num_turns "$num_turns" \
+        --argjson exit_code "$exit_code" \
+        --arg total_cost "$total_cost" \
+        --arg remaining "$remaining_budget" \
+        --arg ts "$(date -Iseconds)" \
+        '{event:$event, attempt:$attempt, session_id:$session_id, is_error:($is_error=="true"),
+          stop_reason:$stop_reason, cost_usd:$cost, duration_ms:$duration_ms,
+          num_turns:$num_turns, exit_code:$exit_code, total_cost_usd:$total_cost,
+          remaining_budget:$remaining, timestamp:$ts}'
+    )"
+
+    rm -f "$result_file"
+
+    # Decide what to do next
+    if [[ $exit_code -eq 124 ]]; then
+        log "  ✘ Timed out after ${MAX_RUNTIME}s"
+        final_status="timeout"
+        final_result="Timed out after ${MAX_RUNTIME}s on attempt $attempt"
+        break
+    fi
+
+    if [[ "$is_error" == "false" ]] && [[ $exit_code -eq 0 ]]; then
+        log "  ✔ Success"
+        final_status="success"
+        final_result="$result_text"
+        break
+    fi
+
+    # Check if budget is exhausted
+    budget_ok=$(awk "BEGIN {print ($remaining_budget > 0.01) ? 1 : 0}" 2>/dev/null || echo "0")
+    if [[ "$budget_ok" != "1" ]]; then
+        log "  ✘ Budget exhausted (\$${total_cost} / \$${MAX_BUDGET})"
+        final_status="budget_exhausted"
+        final_result="Budget exhausted after $attempt attempts (total: \$${total_cost})"
+        break
+    fi
+
+    # If we have more attempts, retry
+    if [[ $attempt -lt $max_attempts ]]; then
+        log "  ↻ Will retry in ${backoff}s (attempt $attempt failed)"
+        # Set resume ID for next attempt
+        if [[ -n "$session_id" ]]; then
+            current_resume="$session_id"
+        fi
+        sleep "$backoff"
+        # Exponential backoff with cap
+        backoff=$(( backoff * 2 ))
+        if [[ $backoff -gt $BACKOFF_MAX ]]; then
+            backoff=$BACKOFF_MAX
+        fi
+    else
+        log "  ✘ All attempts exhausted"
+        final_status="failed"
+        final_result="Failed after $attempt attempts"
+    fi
+done
+
+end_time=$(date +%s)
+total_duration=$(( end_time - start_time ))
+
+# ── Final summary ──
+log ""
+log "═══════════════════════════════════════════════════════"
+log "  FINAL SUMMARY"
+log "═══════════════════════════════════════════════════════"
+log "  Status:     $final_status"
+log "  Attempts:   $attempt / $max_attempts"
+log "  Total Cost: \$${total_cost}"
+log "  Duration:   ${total_duration}s"
+log "  Finished:   $(date)"
+log "═══════════════════════════════════════════════════════"
+
+if [[ -n "$final_result" ]]; then
+    log ""
+    log "── Result ──"
+    log "$final_result"
+fi
+
+# Log summary JSONL
+log_jsonl "$(jq -nc \
+    --arg event "summary" \
+    --arg session "$SESSION_NAME" \
+    --arg status "$final_status" \
+    --argjson attempts "$attempt" \
+    --arg total_cost "$total_cost" \
+    --argjson total_duration_s "$total_duration" \
+    --arg task "$PROMPT" \
+    --arg name "$TASK_NAME" \
+    --arg result_text "$final_result" \
+    --arg ts "$(date -Iseconds)" \
+    '{event:$event, session:$session, status:$status, attempts:$attempts,
+      total_cost_usd:$total_cost, total_duration_s:$total_duration_s,
+      task:$task, name:$name, result_text:$result_text, timestamp:$ts}'
+)"
+
+# ── Notification ──
+if [[ -n "$NOTIFY_URL" ]]; then
+    should_notify="false"
+    if [[ "$final_status" == "success" ]] && [[ "$NOTIFY_ON_SUCCESS" == "true" ]]; then
+        should_notify="true"
+    fi
+    if [[ "$final_status" != "success" ]] && [[ "$NOTIFY_ON_FAILURE" == "true" ]]; then
+        should_notify="true"
+    fi
+
+    if [[ "$should_notify" == "true" ]]; then
+        notify_title="claude-offline: ${final_status} — ${SESSION_NAME}"
+        notify_body="Task: ${PROMPT}
+Status: ${final_status}
+Cost: \$${total_cost}
+Attempts: ${attempt}
+Duration: ${total_duration}s"
+
+        log "Sending notification to $NOTIFY_URL"
+        curl -sf -X POST "$NOTIFY_URL" \
+            -H "Title: $notify_title" \
+            -d "$notify_body" || true
+    fi
+fi
+
+log ""
+log "Session finished. Press Enter to close."
+echo ""
+echo "Claude Code has finished. Press Enter to close this session."
+read -r
+WRAPPER_SCRIPT
+
+chmod +x "$WRAPPER"
+
+# ── Launch tmux session ─────────────────────────────────────────────────────
+
+# Disable the EXIT trap since tmux will manage the wrapper lifecycle
+trap - EXIT
+tmux new-session -d -s "$SESSION_NAME" "bash '$WRAPPER'; rm -f '$WRAPPER'"
+
+echo "Offline session started."
+echo "  Session:   $SESSION_NAME"
+[[ -n "$TASK_NAME" ]] && echo "  Name:      $TASK_NAME"
+echo "  Directory: $PROJECT_DIR"
+echo "  Budget:    \$${MAX_BUDGET}"
+echo "  Timeout:   ${MAX_RUNTIME}s"
+echo "  Retries:   $MAX_RETRIES"
+echo "  Log:       $LOGFILE"
+echo "  JSONL:     $JSONL_FILE"
+echo ""
+echo "Commands:"
+echo "  claude-offline --status              # list sessions"
+echo "  claude-offline --logs $SESSION_NAME  # tail output"
+echo "  claude-offline --result $SESSION_NAME  # show result"
+echo "  tmux attach -t $SESSION_NAME         # attach to session"
+echo "  claude-offline --stop $SESSION_NAME  # stop session"
+
+# Show phone dashboard URL if configured
+PHONE_CONFIG="$HOME/.config/claude-phone/config"
+if [[ -f "$PHONE_CONFIG" ]]; then
+    _phone_ip=$(grep '^VCC_IP=' "$PHONE_CONFIG" | cut -d= -f2)
+    _phone_port=$(grep '^HTTP_PORT=' "$PHONE_CONFIG" | cut -d= -f2)
+    _phone_token=$(grep '^AUTH_TOKEN=' "$PHONE_CONFIG" | cut -d= -f2)
+    if [[ -n "$_phone_ip" && -n "$_phone_port" && -n "$_phone_token" ]]; then
+        echo ""
+        echo "Phone dashboard: http://${_phone_ip}:${_phone_port}/${_phone_token}/"
+    fi
+fi

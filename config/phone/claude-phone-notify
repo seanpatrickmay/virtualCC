@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# Cron-based notification script for Claude Code session state changes.
+# Sends ntfy.sh notifications when sessions appear, disappear, or change status.
+
+set -euo pipefail
+
+# Ensure claude-offline-status and curl are findable from cron
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+CONFIG_FILE="$HOME/.config/claude-phone/config"
+STATE_FILE="$HOME/.local/state/claude-phone/last-state.json"
+LOCK_FILE="$HOME/.local/state/claude-phone/notify.lock"
+CURRENT_FILE=$(mktemp)
+PREV_FILE=$(mktemp)
+trap 'rm -f "$CURRENT_FILE" "$PREV_FILE"' EXIT
+
+# Source config
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    exit 0
+fi
+# shellcheck source=/dev/null
+source "$CONFIG_FILE"
+
+# Prevent overlapping runs
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+    echo "Another instance is running, exiting."
+    exit 0
+fi
+
+# Get current sessions
+if ! claude-offline-status --json 2>/dev/null > "$CURRENT_FILE"; then
+    exit 0
+fi
+[[ ! -s "$CURRENT_FILE" ]] && exit 0
+
+# Validate JSON
+if ! python3 -c "import sys,json; json.load(open(sys.argv[1]))" "$CURRENT_FILE" 2>/dev/null; then
+    exit 0
+fi
+
+# Load previous state (empty object if missing)
+if [[ -f "$STATE_FILE" ]]; then
+    cp "$STATE_FILE" "$PREV_FILE"
+else
+    echo '{}' > "$PREV_FILE"
+fi
+
+# Compare states and send notifications
+python3 - "$NTFY_TOPIC" "$STATE_FILE" "$CURRENT_FILE" "$PREV_FILE" <<'PYEOF'
+import json
+import os
+import subprocess
+import sys
+
+ntfy_topic = sys.argv[1]
+state_file = sys.argv[2]
+current_file = sys.argv[3]
+prev_file = sys.argv[4]
+
+try:
+    with open(current_file) as f:
+        data = json.load(f)
+    # Handle both {"sessions": [...]} and bare [...] formats
+    if isinstance(data, dict):
+        current_list = data.get("sessions", [])
+    elif isinstance(data, list):
+        current_list = data
+    else:
+        sys.exit(0)
+except (json.JSONDecodeError, ValueError):
+    sys.exit(0)
+
+try:
+    with open(prev_file) as f:
+        prev_state = json.load(f)
+except (json.JSONDecodeError, ValueError):
+    prev_state = {}
+
+# Build current state dict: name -> status
+current_state = {}
+for s in current_list:
+    name = s.get("name", "unnamed")
+    status = s.get("status", "UNKNOWN")
+    current_state[name] = status
+
+# Detect transitions
+transitions = []
+
+for name, status in current_state.items():
+    if name not in prev_state:
+        transitions.append(("new", name, None, status))
+    elif prev_state[name] != status:
+        transitions.append(("changed", name, prev_state[name], status))
+
+for name, status in prev_state.items():
+    if name not in current_state:
+        transitions.append(("removed", name, status, None))
+
+# Save current state atomically
+import tempfile
+tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(state_file))
+with os.fdopen(tmp_fd, "w") as f:
+    json.dump(current_state, f)
+os.rename(tmp_path, state_file)
+
+if not transitions:
+    sys.exit(0)
+
+
+def send_ntfy(title, body, priority, tag):
+    try:
+        result = subprocess.run(
+            ["curl", "-sf", "--connect-timeout", "5",
+             "-X", "POST", f"https://ntfy.sh/{ntfy_topic}",
+             "-H", f"Title: {title}",
+             "-H", f"Priority: {priority}",
+             "-H", f"Tags: {tag}",
+             "-d", body],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            print(f"ntfy send failed (rc={result.returncode}): {title}", file=sys.stderr)
+    except subprocess.TimeoutExpired:
+        print(f"ntfy send timed out: {title}", file=sys.stderr)
+    except FileNotFoundError:
+        print("curl not found in PATH", file=sys.stderr)
+    except Exception as e:
+        print(f"ntfy send error: {e}", file=sys.stderr)
+
+
+for kind, name, old_status, new_status in transitions:
+    if kind == "new":
+        send_ntfy(
+            f"VCC: {name} started",
+            f"New session: {name} ({new_status})",
+            "3", "rocket",
+        )
+    elif kind == "removed":
+        send_ntfy(
+            f"VCC: {name} ended",
+            f"Session removed: {name} (was {old_status})",
+            "3", "white_check_mark",
+        )
+    elif kind == "changed":
+        ns = new_status.lower() if new_status else ""
+        if ns == "completed":
+            priority, tag = "3", "white_check_mark"
+        elif ns == "error":
+            priority, tag = "5", "rotating_light"
+        elif ns == "idle":
+            priority, tag = "2", "zzz"
+        else:
+            priority, tag = "3", "arrow_right"
+        send_ntfy(
+            f"VCC: {name} {new_status}",
+            f"{name}: {old_status} -> {new_status}",
+            priority, tag,
+        )
+PYEOF

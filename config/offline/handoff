@@ -1,0 +1,453 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+#
+# handoff — Transfer current work context from local machine to VCC
+#           for autonomous Claude Code execution.
+#
+
+readonly VERSION="1.0.0"
+readonly CONFIG_FILE="${HOME}/.config/handoff/config"
+
+# Defaults
+VCC_HOST="vcc"
+VCC_USER="dev"
+HANDOFF_BRANCH=""
+NO_PUSH=false
+DRY_RUN=false
+CHECK_ONLY=false
+PROJECT_OVERRIDE=""
+TASK=""
+
+# ---------- helpers ----------
+
+die() {
+    printf 'handoff: error: %s\n' "$1" >&2
+    exit 1
+}
+
+info() {
+    printf '  %s\n' "$1"
+}
+
+banner() {
+    printf '\n\033[1m%s\033[0m\n' "$1"
+}
+
+# ---------- config ----------
+
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE"
+    fi
+}
+
+# ---------- usage ----------
+
+usage() {
+    cat <<'USAGE'
+handoff — Transfer work context to VCC for autonomous Claude Code execution.
+
+Usage:
+  handoff [OPTIONS] ["task description"]
+
+Options:
+  --branch <name>    Custom handoff branch name
+  --no-push          Prepare context file but don't execute on VCC
+  --dry-run          Show what would happen without doing it
+  --project <path>   Override project path on VCC
+  --host <hostname>  VCC SSH hostname (default: from config or "vcc")
+  --check            Verify VCC connectivity and claude-offline availability
+  -h, --help         Show this help
+
+Configuration:
+  ~/.config/handoff/config
+    VCC_HOST=vcc
+    VCC_USER=dev
+
+Examples:
+  handoff "Finish implementing the REST API tests"
+  handoff --branch my-feature "Add pagination support"
+  handoff --dry-run "Refactor the auth module"
+  handoff --no-push
+  handoff --check
+USAGE
+}
+
+# ---------- argument parsing ----------
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            --branch)
+                [[ $# -ge 2 ]] || die "--branch requires a value"
+                HANDOFF_BRANCH="$2"
+                shift 2
+                ;;
+            --no-push)
+                NO_PUSH=true
+                shift
+                ;;
+            --dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            --check)
+                CHECK_ONLY=true
+                shift
+                ;;
+            --project)
+                [[ $# -ge 2 ]] || die "--project requires a value"
+                PROJECT_OVERRIDE="$2"
+                shift 2
+                ;;
+            --host)
+                [[ $# -ge 2 ]] || die "--host requires a value"
+                VCC_HOST="$2"
+                shift 2
+                ;;
+            -*)
+                die "unknown option: $1"
+                ;;
+            *)
+                TASK="$1"
+                shift
+                ;;
+        esac
+    done
+}
+
+# ---------- validation ----------
+
+validate_environment() {
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        die "not inside a git repository"
+    fi
+
+    if ! git remote get-url origin >/dev/null 2>&1; then
+        die "no 'origin' remote configured — cannot determine repository URL"
+    fi
+}
+
+# ---------- git info ----------
+
+extract_repo_info() {
+    REMOTE_URL=$(git remote get-url origin)
+    REPO_NAME=$(basename "$REMOTE_URL" .git)
+    # Sanitize repo name for use in branch names and paths
+    REPO_NAME=$(printf '%s' "$REPO_NAME" | tr -c '[:alnum:]._-' '-')
+    CURRENT_BRANCH=$(git branch --show-current)
+    CURRENT_COMMIT=$(git rev-parse --short HEAD)
+    CURRENT_COMMIT_MSG=$(git log -1 --format='%s')
+
+    if [[ -z "$CURRENT_BRANCH" ]]; then
+        die "detached HEAD — please checkout a branch first"
+    fi
+}
+
+# ---------- capture context ----------
+
+capture_context() {
+    # Capture diff against HEAD (includes both staged and unstaged changes)
+    DIFF_STAT=$(git diff --stat HEAD 2>/dev/null || true)
+    DIFF_FULL=$(git diff HEAD 2>/dev/null | head -200; true)
+    LOG_RECENT=$(git log --oneline -10 2>/dev/null || true)
+
+    # Check for staged changes specifically
+    HAS_STAGED_CHANGES=false
+    if [[ -n "$(git diff --cached --name-only 2>/dev/null)" ]]; then
+        HAS_STAGED_CHANGES=true
+    fi
+
+    CLAUDE_MD=""
+    if [[ -f "CLAUDE.md" ]]; then
+        CLAUDE_MD=$(cat CLAUDE.md)
+    fi
+
+    if [[ -z "$TASK" ]]; then
+        TASK="Continue the work in progress"
+    fi
+}
+
+# ---------- check VCC ----------
+
+check_vcc() {
+    banner "Checking VCC connectivity and tools..."
+
+    if ! ssh -o ConnectTimeout=5 "${VCC_HOST}" true 2>/dev/null; then
+        die "cannot connect to VCC host '${VCC_HOST}' via SSH"
+    fi
+    info "SSH connection to ${VCC_HOST}: OK"
+
+    if ! ssh "${VCC_HOST}" command -v claude-offline >/dev/null 2>&1; then
+        die "'claude-offline' not found on ${VCC_HOST}"
+    fi
+    info "claude-offline available: OK"
+
+    if ! ssh "${VCC_HOST}" command -v git >/dev/null 2>&1; then
+        die "'git' not found on ${VCC_HOST}"
+    fi
+    info "git available: OK"
+
+    banner "All checks passed."
+}
+
+# ---------- commit & push WIP ----------
+
+CREATED_BRANCH=false
+
+cleanup_handoff_branch() {
+    if [[ "$CREATED_BRANCH" == true ]]; then
+        printf 'Cleaning up handoff branch...\n' >&2
+        git checkout "$CURRENT_BRANCH" 2>/dev/null || true
+        git branch -D "$ACTUAL_HANDOFF_BRANCH" 2>/dev/null || true
+    fi
+}
+
+commit_and_push() {
+    local is_dirty=false
+
+    if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+        is_dirty=true
+    fi
+
+    if [[ "$HAS_STAGED_CHANGES" == true ]]; then
+        info "Note: you have staged changes that will be included in the WIP commit."
+    fi
+
+    if [[ "$is_dirty" == true ]]; then
+        # Generate handoff branch name
+        if [[ -z "$HANDOFF_BRANCH" ]]; then
+            # Sanitize branch name: replace problematic chars with dashes
+            local safe_branch
+            safe_branch=$(printf '%s' "$CURRENT_BRANCH" | tr -c '[:alnum:]._/-' '-')
+            ACTUAL_HANDOFF_BRANCH="handoff/${safe_branch}-$(date +%Y%m%d-%H%M%S)"
+        else
+            ACTUAL_HANDOFF_BRANCH="$HANDOFF_BRANCH"
+        fi
+
+        if [[ "$DRY_RUN" == true ]]; then
+            banner "DRY RUN: Would create branch and commit WIP"
+            info "Branch: $ACTUAL_HANDOFF_BRANCH"
+            info "Would commit all uncommitted changes"
+            if [[ "$NO_PUSH" == false ]]; then
+                info "Would push to origin"
+            fi
+            return 0
+        fi
+
+        # Check if branch already exists locally or on remote
+        if git show-ref --verify --quiet "refs/heads/$ACTUAL_HANDOFF_BRANCH" 2>/dev/null; then
+            die "branch '$ACTUAL_HANDOFF_BRANCH' already exists locally — use --branch to specify a different name"
+        fi
+        if git ls-remote --exit-code --heads origin "$ACTUAL_HANDOFF_BRANCH" >/dev/null 2>&1; then
+            die "branch '$ACTUAL_HANDOFF_BRANCH' already exists on remote — use --branch to specify a different name"
+        fi
+
+        trap cleanup_handoff_branch ERR INT TERM
+
+        # Stash any staged state, then stage everything for the WIP commit
+        git checkout -b "$ACTUAL_HANDOFF_BRANCH"
+        CREATED_BRANCH=true
+
+        git add -A
+        git commit -m "WIP: handoff to VCC - $(date)"
+
+        if [[ "$NO_PUSH" == false ]]; then
+            git push origin "$ACTUAL_HANDOFF_BRANCH" || {
+                die "failed to push handoff branch to origin"
+            }
+        fi
+
+        # Switch back to original branch
+        git checkout "$CURRENT_BRANCH"
+        CREATED_BRANCH=false   # cleanup no longer needed
+
+        trap - ERR INT TERM
+    else
+        # Clean tree — use current branch
+        ACTUAL_HANDOFF_BRANCH="$CURRENT_BRANCH"
+
+        if [[ "$NO_PUSH" == false && "$DRY_RUN" == false ]]; then
+            # Make sure the branch is pushed
+            if ! git push origin "$CURRENT_BRANCH" 2>/dev/null; then
+                info "Warning: could not push $CURRENT_BRANCH (may already be up to date)"
+            fi
+        fi
+    fi
+}
+
+# ---------- build prompt ----------
+
+build_prompt() {
+    PROMPT=$(cat <<PROMPT_EOF
+You are continuing work that was handed off from a local development session.
+
+## Current State
+- Repository: ${REPO_NAME}
+- Branch: ${ACTUAL_HANDOFF_BRANCH} (based on ${CURRENT_BRANCH})
+- Last commit: ${CURRENT_COMMIT} ${CURRENT_COMMIT_MSG}
+
+## Task
+${TASK}
+
+## Recent Changes
+${DIFF_STAT:-No uncommitted changes at time of handoff.}
+
+## Recent History
+${LOG_RECENT}
+
+## Detailed Changes
+${DIFF_FULL:-No uncommitted changes at time of handoff.}
+
+## Instructions
+1. Review the codebase and recent changes to understand context
+2. Complete the work described above
+3. Commit changes with clear messages
+4. Push to the branch when done
+PROMPT_EOF
+    )
+
+    if [[ -n "$CLAUDE_MD" ]]; then
+        PROMPT="${PROMPT}
+
+## Project CLAUDE.md
+${CLAUDE_MD}"
+    fi
+}
+
+# ---------- execute on VCC ----------
+
+execute_on_vcc() {
+    local repo_path
+    local use_home_prefix=false
+    if [[ -n "$PROJECT_OVERRIDE" ]]; then
+        repo_path="$PROJECT_OVERRIDE"
+    else
+        # We'll resolve $HOME on the remote side
+        repo_path="$REPO_NAME"
+        use_home_prefix=true
+    fi
+
+    # Base64-encode the prompt for safe transport through SSH
+    local encoded_prompt
+    encoded_prompt=$(printf '%s' "$PROMPT" | base64 -w 0)
+
+    if [[ "$DRY_RUN" == true ]]; then
+        local display_path="$repo_path"
+        if [[ "$use_home_prefix" == true ]]; then
+            display_path="\$HOME/${repo_path}"
+        fi
+        banner "DRY RUN: Would execute on VCC"
+        info "Host: ${VCC_HOST}"
+        info "Repo path: ${display_path}"
+        info "Branch: ${ACTUAL_HANDOFF_BRANCH}"
+        info "Task: ${TASK}"
+        printf '\n--- Prompt ---\n%s\n--- End Prompt ---\n' "$PROMPT"
+        return 0
+    fi
+
+    banner "Connecting to VCC (${VCC_HOST})..."
+
+    # Pass all variable data as environment variables through SSH
+    # to avoid heredoc injection. The heredoc is fully quoted ('REMOTE').
+    local ssh_exit=0
+    ssh "${VCC_HOST}" \
+        HANDOFF_REPO_PATH="$repo_path" \
+        HANDOFF_USE_HOME="$use_home_prefix" \
+        HANDOFF_REMOTE_URL="$REMOTE_URL" \
+        HANDOFF_BRANCH="$ACTUAL_HANDOFF_BRANCH" \
+        HANDOFF_REPO_NAME="$REPO_NAME" \
+        HANDOFF_PROMPT_B64="$encoded_prompt" \
+        bash <<'REMOTE' || ssh_exit=$?
+set -e
+# Resolve repo path — prepend $HOME if no explicit override was given
+if [ "${HANDOFF_USE_HOME}" = "true" ]; then
+    HANDOFF_REPO_PATH="${HOME}/${HANDOFF_REPO_PATH}"
+fi
+if [ ! -d "${HANDOFF_REPO_PATH}" ]; then
+    git clone "${HANDOFF_REMOTE_URL}" "${HANDOFF_REPO_PATH}"
+fi
+cd "${HANDOFF_REPO_PATH}"
+git fetch origin
+git checkout "${HANDOFF_BRANCH}" 2>/dev/null || git checkout -b "${HANDOFF_BRANCH}" "origin/${HANDOFF_BRANCH}"
+git pull origin "${HANDOFF_BRANCH}" || true
+
+if ! command -v claude-offline >/dev/null 2>&1; then
+    echo "handoff: error: claude-offline not found on remote host" >&2
+    exit 1
+fi
+
+DECODED_PROMPT=$(echo "${HANDOFF_PROMPT_B64}" | base64 -d)
+
+# Launch claude-offline
+claude-offline --project "${HANDOFF_REPO_PATH}" --name "handoff-${HANDOFF_REPO_NAME}" "${DECODED_PROMPT}"
+REMOTE
+
+    if [[ $ssh_exit -ne 0 ]]; then
+        die "SSH execution on VCC failed (exit code: $ssh_exit)"
+    fi
+}
+
+# ---------- summary ----------
+
+print_summary() {
+    banner "Handoff complete!"
+    info "Repository: ${REPO_NAME}"
+    info "Branch:     ${ACTUAL_HANDOFF_BRANCH}"
+    info "VCC host:   ${VCC_HOST}"
+    info "Task:       ${TASK}"
+    printf '\n'
+    info "Monitor from VCC:  ssh ${VCC_HOST} \"claude-offline --status\""
+    info "View logs:         ssh ${VCC_HOST} \"claude-offline --logs\""
+    info "Attach session:    ssh ${VCC_HOST} -t \"tmux attach -t offline-*\""
+
+    # Show phone dashboard URL if configured on remote
+    local phone_url
+    phone_url=$(ssh "${VCC_HOST}" 'if [ -f ~/.config/claude-phone/config ]; then . ~/.config/claude-phone/config; echo "http://${VCC_IP}:${HTTP_PORT}/${AUTH_TOKEN}/"; fi' 2>/dev/null || true)
+    if [[ -n "$phone_url" ]]; then
+        info "Phone dashboard:   ${phone_url}"
+    fi
+
+    printf '\n'
+    info "You can safely close your laptop now."
+    printf '\n'
+}
+
+# ---------- main ----------
+
+main() {
+    load_config
+    parse_args "$@"
+
+    if [[ "$CHECK_ONLY" == true ]]; then
+        check_vcc
+        return 0
+    fi
+
+    validate_environment
+    extract_repo_info
+    capture_context
+    commit_and_push
+    build_prompt
+
+    if [[ "$NO_PUSH" == true ]]; then
+        banner "Handoff prepared (--no-push mode)"
+        info "Branch: ${ACTUAL_HANDOFF_BRANCH}"
+        info "Prompt built but not sent to VCC."
+        printf '\n--- Prompt ---\n%s\n--- End Prompt ---\n' "$PROMPT"
+        return 0
+    fi
+
+    execute_on_vcc
+    if [[ "$DRY_RUN" == false ]]; then
+        print_summary
+    fi
+}
+
+main "$@"
